@@ -1,0 +1,14 @@
+# Periperi local engine dependencies.
+#
+# Only the full workspace and artifact scanners need these. Save-time and
+# current-file scanning use the source detector in backend/app/detector.py,
+# which is Python standard library only.
+#
+# Install with:  python -m pip install -r requirements.txt
+#
+# Syft and Trivy are separate command-line tools, not Python packages. Install
+# them separately and put them on PATH if you want container-image analysis.
+
+# X.509 / PEM / PKCS#12 parsing and public-key inspection for
+# backend/app/openssl_inspector.py.
+cryptography>=42

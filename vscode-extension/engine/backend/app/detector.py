@@ -11,25 +11,25 @@ from .risk import classical_risk, quantum_risk
 
 
 PATTERNS: list[tuple[str, str, str]] = [
-    ("Algorithm", "AES-256-GCM", r"(?i)AES[-_ ]?256[-_ ]?GCM"),
-    ("Algorithm", "AES-GCM", r"(?i)AES[-_ ]?GCM|AESGCM|AES\.new\([^\n]*MODE_GCM"),
-    ("Algorithm", "AES-ECB", r"(?i)AES[-_ ]?ECB|MODE_ECB"),
+    ("Algorithm", "AES-256-GCM", r"(?i)AES[-_ ]?256[-_ ]?GCM|EVP_aes_256_gcm"),
+    ("Algorithm", "AES-GCM", r"(?i)AES[-_ ]?GCM|AESGCM|AES\.new\([^\n]*MODE_GCM|EVP_aes_(?:128|192)_gcm"),
+    ("Algorithm", "AES-ECB", r"(?i)AES[-_ ]?ECB|MODE_ECB|EVP_aes_(?:128|192|256)_ecb"),
     ("Algorithm", "AES", r"(?i)\bAES(?:[-_ ]?(?:128|192|256))?\b"),
     ("Algorithm", "RSA-1024", r"(?i)RSA[^\n]{0,40}(?:1024|key_size\s*=\s*1024)"),
     ("Algorithm", "RSA-2048", r"(?i)RSA[^\n]{0,40}(?:2048|key_size\s*=\s*2048)"),
-    ("Algorithm", "RSA", r"(?i)\bRSA\b|generate_private_key\s*\("),
-    ("Algorithm", "ECDSA", r"(?i)\bECDSA\b"),
-    ("Algorithm", "ECDH", r"(?i)\bECDH\b"),
+    ("Algorithm", "RSA", r"(?i)\bRSA\b|generate_private_key\s*\(|EVP_PKEY_RSA|RSA_(?:new|sign|verify)"),
+    ("Algorithm", "ECDSA", r"(?i)\bECDSA\b|ECDSA_(?:sign|verify)"),
+    ("Algorithm", "ECDH", r"(?i)\bECDH\b|ECDH_compute_key"),
     ("Algorithm", "ECC", r"(?i)\bECC\b|EllipticCurve"),
     ("Algorithm", "Diffie-Hellman", r"(?i)Diffie[- ]Hellman|\bDHParameters\b"),
     ("Algorithm", "DSA", r"(?i)\bDSA\b"),
-    ("Algorithm", "SHA-1", r"(?i)\bSHA[-_ ]?1\b|sha1\s*\("),
-    ("Algorithm", "SHA-256", r"(?i)\bSHA[-_ ]?256\b|sha256\s*\("),
+    ("Algorithm", "SHA-1", r"(?i)\bSHA[-_ ]?1\b|sha1\s*\(|EVP_sha1|SHA1_(?:Init|Update|Final)"),
+    ("Algorithm", "SHA-256", r"(?i)\bSHA[-_ ]?256\b|sha256\s*\(|EVP_sha256|SHA256_(?:Init|Update|Final)"),
     ("Algorithm", "SHA-384", r"(?i)\bSHA[-_ ]?384\b|sha384\s*\("),
     ("Algorithm", "SHA-512", r"(?i)\bSHA[-_ ]?512\b|sha512\s*\("),
-    ("Algorithm", "MD5", r"(?i)\bMD5\b|md5\s*\("),
+    ("Algorithm", "MD5", r"(?i)\bMD5\b|md5\s*\(|EVP_md5|MD5_(?:Init|Update|Final)"),
     ("Algorithm", "ChaCha20", r"(?i)\bChaCha20(?:Poly1305)?\b"),
-    ("Library", "OpenSSL", r"(?i)\bOpenSSL\b|<openssl/"),
+    ("Library", "OpenSSL", r"(?i)\bOpenSSL\b|<openssl/|\blib(?:crypto|ssl)(?:\.so|\.dll|\.dylib)?\b|\bEVP_[A-Za-z0-9_]+"),
     ("Library", "PyCryptodome", r"(?i)(?:from|import)\s+Crypto(?:\.|\b)|PyCryptodome"),
     ("Library", "Python cryptography", r"(?i)(?:from|import)\s+cryptography(?:\.|\b)"),
     ("Library", "libsodium", r"(?i)\blibsodium\b|\bsodium_(?:init|crypto)"),
@@ -77,6 +77,11 @@ def _make_finding(
         "quantum": q,
         "recommendation": recommendation(name, category, risk),
     }
+
+
+def make_finding(**kwargs: Any) -> dict[str, Any]:
+    """Public finding factory shared by source, binary and OpenSSL inspectors."""
+    return _make_finding(**kwargs)
 
 
 def detect_file(
