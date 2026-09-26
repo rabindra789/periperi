@@ -5,6 +5,10 @@
   "version": "0.1.0",
   "publisher": "thesixbugs",
   "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rabindra789/periperi.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -83,11 +87,12 @@
     "watch": "tsc -watch -p ./",
     "check": "tsc --noEmit -p ./",
     "prepare-engine": "node scripts/prepare-engine.mjs",
-    "package": "npm run compile && npm run prepare-engine && npx --yes @vscode/vsce package --out ECDAT-Cryptographic-Scanner-0.1.0.vsix"
+    "package": "vsce package --out ECDAT-Cryptographic-Scanner-0.1.0.vsix"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^4.0.0",
     "typescript": "^5.7.2"
   }
 }
