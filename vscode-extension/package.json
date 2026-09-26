@@ -1,7 +1,7 @@
 {
-  "name": "ecdat-vscode",
-  "displayName": "ECDAT Cryptographic Scanner",
-  "description": "Local cryptographic discovery, risk diagnostics and CBOM export for VS Code.",
+  "name": "periperi",
+  "displayName": "Periperi",
+  "description": "Periperi: local cryptographic discovery, risk diagnostics and CBOM export for VS Code.",
   "version": "0.1.0",
   "publisher": "thesixbugs",
   "license": "UNLICENSED",
@@ -87,7 +87,7 @@
     "watch": "tsc -watch -p ./",
     "check": "tsc --noEmit -p ./",
     "prepare-engine": "node scripts/prepare-engine.mjs",
-    "package": "vsce package --out ECDAT-Cryptographic-Scanner-0.1.0.vsix"
+    "package": "vsce package --out periperi-0.1.0.vsix"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
