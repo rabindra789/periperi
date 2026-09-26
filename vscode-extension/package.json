@@ -1,0 +1,93 @@
+{
+  "name": "ecdat-vscode",
+  "displayName": "ECDAT Cryptographic Scanner",
+  "description": "Local cryptographic discovery, risk diagnostics and CBOM export for VS Code.",
+  "version": "0.1.0",
+  "publisher": "thesixbugs",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Linters", "Other"],
+  "keywords": ["cryptography", "security", "cbom", "post-quantum", "scanner"],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:ecdat.scanCurrentFile",
+    "onCommand:ecdat.scanWorkspace",
+    "onCommand:ecdat.showReport",
+    "onCommand:ecdat.exportCbom"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {"command": "ecdat.scanCurrentFile", "title": "ECDAT: Scan Current File"},
+      {"command": "ecdat.scanWorkspace", "title": "ECDAT: Scan Workspace"},
+      {"command": "ecdat.showReport", "title": "ECDAT: Show Cryptographic Report"},
+      {"command": "ecdat.exportCbom", "title": "ECDAT: Export CBOM"},
+      {"command": "ecdat.clearDiagnostics", "title": "ECDAT: Clear Findings"}
+    ],
+    "menus": {
+      "editor/context": [
+        {"command": "ecdat.scanCurrentFile", "group": "navigation@8", "when": "editorTextFocus"}
+      ]
+    },
+    "configuration": {
+      "title": "ECDAT",
+      "properties": {
+        "ecdat.scanOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Scan supported files locally whenever they are saved."
+        },
+        "ecdat.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python executable used to run the local ECDAT engine."
+        },
+        "ecdat.engineRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Optional ECDAT repository root. Leave empty when the extension folder is inside the repository."
+        },
+        "ecdat.dataSensitivity": {
+          "type": "string",
+          "enum": ["ephemeral", "internal", "pii", "financial", "high_sensitivity"],
+          "default": "pii",
+          "description": "Data lifetime assumption used by the prototype quantum-risk model."
+        },
+        "ecdat.migrationComplexity": {
+          "type": "string",
+          "enum": ["small_project", "standard_application", "legacy_application", "complex_system"],
+          "default": "standard_application",
+          "description": "Migration-time assumption used by the prototype quantum-risk model."
+        },
+        "ecdat.threatTimeline": {
+          "type": "number",
+          "default": 15,
+          "minimum": 5,
+          "maximum": 50,
+          "description": "Assumed quantum threat timeline in years."
+        },
+        "ecdat.maxWorkspaceFiles": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 1,
+          "maximum": 25000,
+          "description": "Maximum number of files included in a manual workspace scan."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "check": "tsc --noEmit -p ./",
+    "prepare-engine": "node scripts/prepare-engine.mjs",
+    "package": "npm run compile && npm run prepare-engine && npx --yes @vscode/vsce package --out ECDAT-Cryptographic-Scanner-0.1.0.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.7.2"
+  }
+}
