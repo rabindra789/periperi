@@ -1,4 +1,4 @@
-# Periperi
+# ECDAT VS Code Extension
 
 [![Release](https://img.shields.io/github/v/release/rabindra789/periperi?display_name=tag)](https://github.com/rabindra789/periperi/releases)
 
@@ -40,7 +40,7 @@ VS Code UI  ──commands──▶  out/extension.js  ──JSON on stdin──
 
 The extension writes one JSON request to the child's stdin and reads one JSON response from stdout. Everything else is local process I/O. See [Engine layout](#engine-layout) for the module map.
 
-## Requirements
+## Development setup
 
 Python 3 must be available locally. **No Periperi server is required.**
 
@@ -95,7 +95,7 @@ This produces `periperi-0.2.0.vsix`.
 
 Command IDs and the `ecdat.*` settings namespace are unchanged from 0.1.0, so existing settings and keybindings keep working.
 
-## Settings
+To build an installable package that includes the local Python scanner and all supported runtime variants:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
@@ -185,9 +185,9 @@ engine/backend/app/
 - Archive extraction rejects absolute and `..` member paths, and skips symlinks and hard links.
 - Periperi never executes project code, scanned binaries or container layers, and never makes network requests.
 
-## Development
+Install the generated `.vsix` through **Extensions: Install from VSIX**. No ECDAT server or package installation is required. Syft and Trivy remain optional external tools for container checks.
 
-Open the repository in VS Code, select the `vscode-extension` folder, and press `F5` to start an Extension Development Host. Open a source file and run **Periperi: Scan Current File**.
+## Commands
 
 The TypeScript sources are not present in this repository, so `npm run compile`, `npm run watch`, `npm run check` and `npm run prepare-engine` do not run. The compiled `out/extension.js` is committed and `npm run package` builds the `.vsix` directly from it. Because the bundle cannot be recompiled, its status bar, notifications, report panel and CBOM output are still labelled "ECDAT"; only the manifest, the Command Palette titles and the package filename use the Periperi name. Restoring the TypeScript sources would let the remaining strings be renamed at source.
 

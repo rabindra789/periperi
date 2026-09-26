@@ -43,7 +43,7 @@ const supportedExtensions = new Set([
     '.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.c', '.cpp', '.h', '.hpp', '.go', '.rs',
     '.php', '.rb', '.cs', '.kt', '.swift', '.yaml', '.yml', '.json', '.xml', '.conf', '.config',
     '.ini', '.env', '.txt', '.md', '.toml', '.properties', '.gradle', '.lock', '.sh', '.ps1',
-    '.pem', '.crt', '.cer', '.der', '.key', '.jks', '.keystore'
+    '.pem', '.crt', '.cer', '.der', '.key', '.jks', '.keystore', '.mod'
 ]);
 const excludedGlob = '**/{.git,.gradle,.cache,.next,.idea,.vscode,node_modules,venv,.venv,__pycache__,target,dist,build,out,bin,obj,coverage,vendor}/**';
 const diagnostics = vscode.languages.createDiagnosticCollection('ecdat');
@@ -52,6 +52,7 @@ let statusItem;
 let reportPanel;
 let lastEngines = {};
 let lastInputType = 'source-file';
+let lastScanCompleted = false;
 function activate(context) {
     statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90);
     statusItem.command = 'ecdat.showReport';
@@ -93,6 +94,7 @@ async function scanDocument(document, announce) {
         const findings = response.findings;
         lastEngines = response.engines || lastEngines;
         lastInputType = response.input_type || 'source-file';
+        lastScanCompleted = true;
         results.set(document.uri.toString(), { uri: document.uri, findings });
         diagnostics.set(document.uri, findings.map(toDiagnostic));
         updateStatus();
@@ -116,16 +118,22 @@ async function scanWorkspace() {
     }
     results.clear();
     diagnostics.clear();
+    lastScanCompleted = false;
     setStatus('$(loading~spin) ECDAT scanning workspace');
     try {
         const response = await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
             title: 'ECDAT full workspace scan · source, binaries, certificates and keys',
             cancellable: false,
-        }, () => runEngineRequest({ ...engineOptions(), mode: 'workspace', path: folder.uri.fsPath }));
+        }, progress => {
+            const reportProgress = createProgressReporter(progress);
+            reportProgress({ phase: 'preparing', count: 0, total: 0, message: 'Preparing workspace scan' });
+            return runEngineRequest({ ...engineOptions(), mode: 'workspace', path: folder.uri.fsPath }, reportProgress);
+        });
         results.set(folder.uri.toString(), { uri: folder.uri, findings: response.findings });
         lastEngines = response.engines || {};
         lastInputType = response.input_type || 'workspace';
+        lastScanCompleted = true;
         const byFile = new Map();
         for (const finding of response.findings) {
             if (!finding.line || finding.file === 'container-image')
@@ -145,6 +153,7 @@ async function scanWorkspace() {
         void vscode.window.showInformationMessage(`ECDAT: Scanned ${response.files_scanned || 0} files and found ${response.findings.length} items.`);
     }
     catch (error) {
+        lastScanCompleted = false;
         setStatus('$(error) ECDAT error');
         void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'ECDAT workspace scan failed.');
     }
@@ -162,23 +171,30 @@ async function scanArtifact() {
     });
     if (!selected?.[0])
         return;
+    lastScanCompleted = false;
     setStatus('$(loading~spin) ECDAT scanning artifact');
     try {
         const response = await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
             title: `ECDAT scanning ${path.basename(selected[0].fsPath)}`,
             cancellable: false,
-        }, () => runEngineRequest({ ...engineOptions(), mode: 'artifact', path: selected[0].fsPath }));
+        }, progress => {
+            const reportProgress = createProgressReporter(progress);
+            reportProgress({ phase: 'preparing', count: 0, total: 0, message: 'Preparing artifact scan' });
+            return runEngineRequest({ ...engineOptions(), mode: 'artifact', path: selected[0].fsPath }, reportProgress);
+        });
         results.clear();
         diagnostics.clear();
         results.set(selected[0].toString(), { uri: selected[0], findings: response.findings });
         lastEngines = response.engines || {};
         lastInputType = response.input_type || 'artifact';
+        lastScanCompleted = true;
         updateStatus();
         showReport();
         void vscode.window.showInformationMessage(`ECDAT: Found ${response.findings.length} cryptographic items.`);
     }
     catch (error) {
+        lastScanCompleted = false;
         setStatus('$(error) ECDAT error');
         void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'ECDAT artifact scan failed.');
     }
@@ -191,10 +207,43 @@ function engineOptions() {
         threat_timeline: config.get('threatTimeline', 15),
     };
 }
+function createProgressReporter(progress) {
+    let lastPercent = 0;
+    return event => {
+        const total = event.total > 0 ? event.total : 0;
+        const percent = total ? Math.min(100, Math.round(event.count / total * 100)) : 0;
+        const increment = total ? Math.max(0, percent - lastPercent) : undefined;
+        lastPercent = Math.max(lastPercent, percent);
+        const counter = total ? ` (${event.count}/${event.total})` : '';
+        progress.report({ message: `${event.message}${counter}`, increment });
+        setStatus(`$(loading~spin) ECDAT ${event.message.toLowerCase()}`);
+    };
+}
+function parseProgressLine(line) {
+    const prefix = 'ECDAT_PROGRESS ';
+    if (!line.startsWith(prefix))
+        return undefined;
+    try {
+        const value = JSON.parse(line.slice(prefix.length));
+        if (typeof value.phase === 'string'
+            && typeof value.message === 'string'
+            && typeof value.count === 'number'
+            && typeof value.total === 'number'
+            && Number.isFinite(value.count)
+            && Number.isFinite(value.total)
+            && value.count >= 0
+            && value.total >= 0)
+            return value;
+    }
+    catch {
+        return undefined;
+    }
+    return undefined;
+}
 function runEngine(uri, text) {
     return runEngineRequest({ ...engineOptions(), mode: 'text', path: vscode.workspace.asRelativePath(uri, false).replaceAll('\\', '/'), text });
 }
-function runEngineRequest(payloadObject) {
+function runEngineRequest(payloadObject, onProgress) {
     const config = vscode.workspace.getConfiguration('ecdat');
     const extensionRoot = path.resolve(__dirname, '..');
     const configuredRoot = config.get('engineRoot', '').trim();
@@ -203,14 +252,59 @@ function runEngineRequest(payloadObject) {
     const repositoryRoot = configuredRoot || (hasBundledEngine ? bundledRoot : path.resolve(extensionRoot, '..'));
     const python = config.get('pythonPath', 'python');
     const payload = JSON.stringify(payloadObject);
+    const searchPaths = [repositoryRoot];
+    const runtimeRoot = path.join(bundledRoot, 'runtime');
+    const runtimeReport = process.report?.getReport();
+    const isMusl = process.platform === 'linux' && !runtimeReport?.header?.glibcVersionRuntime;
+    const runtimeNames = [
+        isMusl ? `linux-${process.arch}-musl` : '',
+        `${process.platform}-${process.arch}`,
+        process.platform,
+        process.platform === 'win32' && process.arch === 'x64' ? 'win32-x64' : '',
+        process.platform === 'darwin' && process.arch === 'x64' ? 'darwin-x64' : '',
+        process.platform === 'linux' && process.arch === 'x64' ? 'linux-x64' : '',
+    ].filter(Boolean);
+    const bundledRuntime = runtimeNames
+        .map(name => path.join(runtimeRoot, name))
+        .find(candidate => fs.existsSync(path.join(candidate, 'cryptography')))
+        || (fs.existsSync(path.join(runtimeRoot, 'cryptography')) ? runtimeRoot : undefined);
+    const dependencyCandidates = [
+        ...(bundledRuntime ? [bundledRuntime] : []),
+        path.join(repositoryRoot, '.runtime', 'python'),
+        path.resolve(extensionRoot, '..', '.runtime', 'python'),
+    ];
+    const localDependencies = dependencyCandidates.find(candidate => fs.existsSync(path.join(candidate, 'cryptography')));
+    if (localDependencies)
+        searchPaths.push(localDependencies);
+    const bootstrap = `import sys; sys.path[:0]=${JSON.stringify(searchPaths)}; from backend.app.vscode_bridge import main; main()`;
     return new Promise((resolve, reject) => {
-        const child = (0, node_child_process_1.spawn)(python, ['-m', 'backend.app.vscode_bridge'], { cwd: repositoryRoot, windowsHide: true });
+        const child = (0, node_child_process_1.spawn)(python, ['-c', bootstrap], { cwd: repositoryRoot, windowsHide: true });
         let output = '';
         let errors = '';
+        let stderrBuffer = '';
+        const consumeErrors = (chunk) => {
+            stderrBuffer += chunk;
+            const lines = stderrBuffer.split(/\r?\n/);
+            stderrBuffer = lines.pop() || '';
+            for (const line of lines) {
+                const event = parseProgressLine(line);
+                if (event)
+                    onProgress?.(event);
+                else if (line.trim())
+                    errors = `${errors}${line}\n`.slice(-8000);
+            }
+        };
         child.stdout.setEncoding('utf8').on('data', chunk => { output += chunk; });
-        child.stderr.setEncoding('utf8').on('data', chunk => { errors += chunk; });
+        child.stderr.setEncoding('utf8').on('data', consumeErrors);
         child.on('error', () => reject(new Error('ECDAT could not start Python. Check the ecdat.pythonPath setting.')));
         child.on('close', code => {
+            if (stderrBuffer.trim()) {
+                const event = parseProgressLine(stderrBuffer);
+                if (event)
+                    onProgress?.(event);
+                else
+                    errors = `${errors}${stderrBuffer}\n`.slice(-8000);
+            }
             try {
                 const response = JSON.parse(output);
                 if (code !== 0 || response.error)
@@ -219,8 +313,8 @@ function runEngineRequest(payloadObject) {
                     resolve({ ...response, findings: response.findings || [] });
             }
             catch {
-                const dependencyHint = errors.includes("No module named 'cryptography'")
-                    ? 'ECDAT full scanning requires the Python dependencies. Run: python -m pip install -r requirements.txt'
+                const dependencyHint = errors.includes("No module named 'cryptography'") || errors.includes('_cffi_backend')
+                    ? 'ECDAT could not load its bundled Python runtime. Reinstall the latest VSIX or set ecdat.pythonPath to a compatible CPython 3.10-3.14 executable.'
                     : errors;
                 reject(new Error(dependencyHint || 'ECDAT returned an unreadable result. Check the engine path.'));
             }
@@ -268,6 +362,85 @@ function isProbablyBinary(bytes) {
 function allFindings() {
     return [...results.values()].flatMap(item => item.findings);
 }
+function inventoryByCategory(findings, category) {
+    return [...new Set(findings.filter(item => item.category === category && item.name).map(item => item.name))].sort();
+}
+function dependencyInventory(findings) {
+    return findings
+        .filter(item => (item.version !== null && item.version !== undefined && item.version !== '') || item.metadata?.source === 'manifest')
+        .map(item => {
+        const source = String(item.metadata?.source || '');
+        const version = String(item.version || 'unspecified');
+        return {
+            name: item.name,
+            version,
+            declared_version: version,
+            resolved_version: source === 'syft' || source === 'trivy' ? version : null,
+            version_type: source === 'syft' || source === 'trivy' ? 'resolved' : 'declared',
+            ecosystem: String(item.metadata?.ecosystem || 'unknown'),
+            scope: String(item.metadata?.scope || 'runtime'),
+            manifest: String(item.metadata?.manifest || item.file || 'unknown'),
+            crypto_relevant: item.category === 'Library',
+        };
+    });
+}
+function recommendationInventory(findings) {
+    return findings.map(item => ({
+        action: item.recommendation,
+        ...(item.recommendation_details || {}),
+        finding_id: item.id,
+        finding: item.name,
+        risk: item.risk,
+        quantum_risk: item.quantum_risk,
+    }));
+}
+function highestLevel(distribution, quantum = false) {
+    const levels = quantum ? ['critical', 'high', 'medium', 'low'] : ['critical', 'high', 'medium', 'low', 'info'];
+    return levels.find(level => (distribution[level] || 0) > 0) || null;
+}
+function buildCbomReport(findings) {
+    const riskDistribution = findings.reduce((counts, item) => {
+        counts[item.risk] = (counts[item.risk] || 0) + 1;
+        return counts;
+    }, {});
+    const quantumDistribution = findings.reduce((counts, item) => {
+        counts[item.quantum_risk] = (counts[item.quantum_risk] || 0) + 1;
+        return counts;
+    }, {});
+    const categoryDistribution = findings.reduce((counts, item) => {
+        const category = item.category.toLowerCase();
+        counts[category] = (counts[category] || 0) + 1;
+        return counts;
+    }, {});
+    return {
+        specification: 'ECDAT CBOM Prototype 1.0',
+        generated_at: new Date().toISOString(),
+        workspace: vscode.workspace.name || 'workspace',
+        input_type: lastInputType,
+        engines: lastEngines,
+        files_with_findings: results.size,
+        findings_count: findings.length,
+        risk: highestLevel(riskDistribution),
+        risk_distribution: riskDistribution,
+        quantum_risk: highestLevel(quantumDistribution, true),
+        quantum_risk_distribution: quantumDistribution,
+        category_distribution: categoryDistribution,
+        inventory: {
+            algorithms: inventoryByCategory(findings, 'Algorithm'),
+            libraries: inventoryByCategory(findings, 'Library'),
+            certificates: inventoryByCategory(findings, 'Certificate'),
+            keys: inventoryByCategory(findings, 'Key'),
+            hsms: inventoryByCategory(findings, 'HSM'),
+            key_management_services: inventoryByCategory(findings, 'Key Management'),
+            protocols: inventoryByCategory(findings, 'Protocol'),
+            versions: dependencyInventory(findings),
+            containers: [],
+        },
+        recommendations: recommendationInventory(findings),
+        findings,
+        disclaimer: 'Rule-based prototype inventory; validate findings before security decisions.',
+    };
+}
 function updateStatus() {
     const findings = allFindings();
     const urgent = findings.filter(item => item.risk === 'critical' || item.risk === 'high').length;
@@ -285,6 +458,7 @@ function clearAll() {
     refreshReport();
     lastEngines = {};
     lastInputType = 'source-file';
+    lastScanCompleted = false;
 }
 function showReport() {
     if (!reportPanel) {
@@ -306,30 +480,49 @@ function refreshReport() {
     const rows = findings.map(item => `
     <tr>
       <td><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.category)}</small></td>
-      <td>${escapeHtml(item.file)}:${item.line}</td>
+      <td>${escapeHtml(item.file)}${item.line > 0 ? `:${item.line}` : ''}</td>
       <td><span class="badge ${escapeHtml(item.risk)}">${escapeHtml(item.risk)}</span></td>
       <td>${escapeHtml(item.quantum_risk.replace('_', ' '))}</td>
       <td>${escapeHtml(item.recommendation)}</td>
     </tr>`).join('');
+    const cbom = buildCbomReport(findings);
+    const cbomPreview = escapeHtml(JSON.stringify({
+        specification: cbom.specification,
+        generated_at: cbom.generated_at,
+        workspace: cbom.workspace,
+        input_type: cbom.input_type,
+        files_with_findings: cbom.files_with_findings,
+        findings_count: cbom.findings_count,
+        risk: cbom.risk,
+        risk_distribution: cbom.risk_distribution,
+        quantum_risk: cbom.quantum_risk,
+        quantum_risk_distribution: cbom.quantum_risk_distribution,
+        category_distribution: cbom.category_distribution,
+        inventory: cbom.inventory,
+        recommendations: Array.isArray(cbom.recommendations) ? cbom.recommendations.slice(0, 20) : [],
+        findings: findings.slice(0, 20),
+    }, null, 2) || '');
     reportPanel.webview.html = `<!doctype html><html><head><meta charset="UTF-8"><style>
     :root{color-scheme:light dark}body{font-family:var(--vscode-font-family);padding:24px;line-height:1.5}
     h1{font-size:26px;margin:0 0 4px}.sub{opacity:.7;margin:0 0 24px}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:22px}
     .metric{border:1px solid var(--vscode-panel-border);padding:14px}.metric b{display:block;font-size:25px}.metric span{font-size:11px;opacity:.7;text-transform:uppercase}
     table{border-collapse:collapse;width:100%;font-size:12px}th,td{border-bottom:1px solid var(--vscode-panel-border);padding:10px;text-align:left;vertical-align:top}th{font-size:10px;text-transform:uppercase;opacity:.75}
     td small{display:block;opacity:.65;margin-top:3px}.badge{text-transform:uppercase;font-size:10px;font-weight:700}.critical,.high{color:#e05c63}.medium{color:#d7a13d}.low{color:#47a884}.info{color:#6fa7c7}
+    .cbom-report{border:1px solid var(--vscode-panel-border);margin:0 0 22px;padding:16px}.cbom-report h2{font-size:17px;margin:0 0 4px}.cbom-report p{opacity:.7;margin:0 0 12px;font-size:12px}.cbom-report pre{background:var(--vscode-textCodeBlock-background);padding:12px;max-height:360px;overflow:auto;font-size:11px;white-space:pre-wrap;word-break:break-word}
     .empty{padding:45px 0;text-align:center;opacity:.7}@media(max-width:800px){.metrics{grid-template-columns:repeat(2,1fr)}table{display:block;overflow:auto}}
   </style></head><body>
     <h1>ECDAT Cryptographic Report</h1><p class="sub">${escapeHtml(lastInputType.replaceAll('-', ' '))}${engineLabels ? ` · ${escapeHtml(engineLabels)}` : ''}</p>
     <div class="metrics"><div class="metric"><b>${findings.length}</b><span>Total findings</span></div><div class="metric"><b>${count('critical')}</b><span>Critical</span></div><div class="metric"><b>${count('high')}</b><span>High</span></div><div class="metric"><b>${results.size}</b><span>Files with findings</span></div></div>
+    <section class="cbom-report"><h2>CBOM report</h2><p>Preview of the generated CBOM. Run <strong>ECDAT: Export CBOM</strong> to save the complete report as JSON.</p><pre>${cbomPreview}</pre></section>
     ${findings.length ? `<table><thead><tr><th>Finding</th><th>Location</th><th>Risk</th><th>Quantum</th><th>Recommendation</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">Run an ECDAT file or workspace scan to populate this report.</div>'}
   </body></html>`;
 }
 async function exportCbom() {
-    const findings = allFindings();
-    if (!findings.length) {
+    if (!lastScanCompleted) {
         void vscode.window.showInformationMessage('ECDAT: Run a scan before exporting a CBOM.');
         return;
     }
+    const findings = allFindings();
     const target = await vscode.window.showSaveDialog({
         defaultUri: vscode.workspace.workspaceFolders?.[0]
             ? vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, 'ecdat-cbom.json')
@@ -339,22 +532,7 @@ async function exportCbom() {
     });
     if (!target)
         return;
-    const riskDistribution = findings.reduce((counts, item) => {
-        counts[item.risk] = (counts[item.risk] || 0) + 1;
-        return counts;
-    }, {});
-    const report = {
-        specification: 'ECDAT CBOM Prototype 1.0',
-        generated_at: new Date().toISOString(),
-        workspace: vscode.workspace.name || 'workspace',
-        input_type: lastInputType,
-        engines: lastEngines,
-        files_with_findings: results.size,
-        findings_count: findings.length,
-        risk_distribution: riskDistribution,
-        findings,
-        disclaimer: 'Rule-based prototype inventory; validate findings before security decisions.',
-    };
+    const report = buildCbomReport(findings);
     await vscode.workspace.fs.writeFile(target, Buffer.from(JSON.stringify(report, null, 2), 'utf8'));
     void vscode.window.showInformationMessage('ECDAT: CBOM exported successfully.');
 }
