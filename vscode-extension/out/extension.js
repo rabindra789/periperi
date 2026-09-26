@@ -50,13 +50,15 @@ const diagnostics = vscode.languages.createDiagnosticCollection('ecdat');
 const results = new Map();
 let statusItem;
 let reportPanel;
+let lastEngines = {};
+let lastInputType = 'source-file';
 function activate(context) {
     statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90);
     statusItem.command = 'ecdat.showReport';
     statusItem.text = '$(shield) ECDAT ready';
     statusItem.tooltip = 'Open the ECDAT cryptographic report';
     statusItem.show();
-    context.subscriptions.push(diagnostics, statusItem, vscode.commands.registerCommand('ecdat.scanCurrentFile', scanActiveEditor), vscode.commands.registerCommand('ecdat.scanWorkspace', scanWorkspace), vscode.commands.registerCommand('ecdat.showReport', showReport), vscode.commands.registerCommand('ecdat.exportCbom', exportCbom), vscode.commands.registerCommand('ecdat.clearDiagnostics', clearAll), vscode.workspace.onDidSaveTextDocument(document => {
+    context.subscriptions.push(diagnostics, statusItem, vscode.commands.registerCommand('ecdat.scanCurrentFile', scanActiveEditor), vscode.commands.registerCommand('ecdat.scanWorkspace', scanWorkspace), vscode.commands.registerCommand('ecdat.scanArtifact', scanArtifact), vscode.commands.registerCommand('ecdat.showReport', showReport), vscode.commands.registerCommand('ecdat.exportCbom', exportCbom), vscode.commands.registerCommand('ecdat.clearDiagnostics', clearAll), vscode.workspace.onDidSaveTextDocument(document => {
         if (vscode.workspace.getConfiguration('ecdat').get('scanOnSave', true)) {
             void scanDocument(document, false);
         }
@@ -87,7 +89,10 @@ async function scanDocument(document, announce) {
     }
     setStatus('$(loading~spin) ECDAT scanning');
     try {
-        const findings = await runEngine(document.uri, document.getText());
+        const response = await runEngine(document.uri, document.getText());
+        const findings = response.findings;
+        lastEngines = response.engines || lastEngines;
+        lastInputType = response.input_type || 'source-file';
         results.set(document.uri.toString(), { uri: document.uri, findings });
         diagnostics.set(document.uri, findings.map(toDiagnostic));
         updateStatus();
@@ -109,46 +114,87 @@ async function scanWorkspace() {
         void vscode.window.showInformationMessage('ECDAT: Open a workspace folder first.');
         return;
     }
-    const maximum = vscode.workspace.getConfiguration('ecdat').get('maxWorkspaceFiles', 2000);
-    const searchRoot = new vscode.RelativePattern(folder, '**/*');
-    const uris = (await vscode.workspace.findFiles(searchRoot, excludedGlob, maximum)).filter(uri => isSupported(uri.fsPath));
     results.clear();
     diagnostics.clear();
-    let completed = 0;
-    let skipped = 0;
-    await vscode.window.withProgress({
-        location: vscode.ProgressLocation.Notification,
-        title: 'ECDAT workspace scan',
-        cancellable: true,
-    }, async (progress, token) => {
-        for (const uri of uris) {
-            if (token.isCancellationRequested)
-                break;
-            try {
-                const bytes = await vscode.workspace.fs.readFile(uri);
-                if (bytes.byteLength > 2 * 1024 * 1024 || isProbablyBinary(bytes)) {
-                    skipped += 1;
-                }
-                else {
-                    const findings = await runEngine(uri, Buffer.from(bytes).toString('utf8'));
-                    results.set(uri.toString(), { uri, findings });
-                    diagnostics.set(uri, findings.map(toDiagnostic));
-                }
-            }
-            catch {
-                skipped += 1;
-            }
-            completed += 1;
-            progress.report({ message: `${completed} of ${uris.length} files`, increment: uris.length ? 100 / uris.length : 100 });
+    setStatus('$(loading~spin) ECDAT scanning workspace');
+    try {
+        const response = await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: 'ECDAT full workspace scan · source, binaries, certificates and keys',
+            cancellable: false,
+        }, () => runEngineRequest({ ...engineOptions(), mode: 'workspace', path: folder.uri.fsPath }));
+        results.set(folder.uri.toString(), { uri: folder.uri, findings: response.findings });
+        lastEngines = response.engines || {};
+        lastInputType = response.input_type || 'workspace';
+        const byFile = new Map();
+        for (const finding of response.findings) {
+            if (!finding.line || finding.file === 'container-image')
+                continue;
+            const candidate = path.resolve(folder.uri.fsPath, finding.file);
+            const relative = path.relative(path.resolve(folder.uri.fsPath), candidate);
+            if (relative.startsWith('..') || path.isAbsolute(relative) || !fs.existsSync(candidate))
+                continue;
+            const items = byFile.get(candidate) || [];
+            items.push(finding);
+            byFile.set(candidate, items);
         }
-    });
-    updateStatus();
-    showReport();
-    if (skipped) {
-        void vscode.window.showInformationMessage(`ECDAT: Scan completed; ${skipped} unreadable or binary file${skipped === 1 ? '' : 's'} skipped.`);
+        for (const [filePath, findings] of byFile)
+            diagnostics.set(vscode.Uri.file(filePath), findings.map(toDiagnostic));
+        updateStatus();
+        showReport();
+        void vscode.window.showInformationMessage(`ECDAT: Scanned ${response.files_scanned || 0} files and found ${response.findings.length} items.`);
+    }
+    catch (error) {
+        setStatus('$(error) ECDAT error');
+        void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'ECDAT workspace scan failed.');
     }
 }
+async function scanArtifact() {
+    const selected = await vscode.window.showOpenDialog({
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: false,
+        openLabel: 'Scan with ECDAT',
+        filters: {
+            'ECDAT inputs': ['zip', 'tar', 'gz', 'tgz', 'exe', 'dll', 'so', 'dylib', 'jar', 'war', 'apk', 'pem', 'crt', 'cer', 'der', 'key', 'p12', 'pfx'],
+            'All files': ['*'],
+        },
+    });
+    if (!selected?.[0])
+        return;
+    setStatus('$(loading~spin) ECDAT scanning artifact');
+    try {
+        const response = await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: `ECDAT scanning ${path.basename(selected[0].fsPath)}`,
+            cancellable: false,
+        }, () => runEngineRequest({ ...engineOptions(), mode: 'artifact', path: selected[0].fsPath }));
+        results.clear();
+        diagnostics.clear();
+        results.set(selected[0].toString(), { uri: selected[0], findings: response.findings });
+        lastEngines = response.engines || {};
+        lastInputType = response.input_type || 'artifact';
+        updateStatus();
+        showReport();
+        void vscode.window.showInformationMessage(`ECDAT: Found ${response.findings.length} cryptographic items.`);
+    }
+    catch (error) {
+        setStatus('$(error) ECDAT error');
+        void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'ECDAT artifact scan failed.');
+    }
+}
+function engineOptions() {
+    const config = vscode.workspace.getConfiguration('ecdat');
+    return {
+        sensitivity: config.get('dataSensitivity', 'pii'),
+        migration_complexity: config.get('migrationComplexity', 'standard_application'),
+        threat_timeline: config.get('threatTimeline', 15),
+    };
+}
 function runEngine(uri, text) {
+    return runEngineRequest({ ...engineOptions(), mode: 'text', path: vscode.workspace.asRelativePath(uri, false).replaceAll('\\', '/'), text });
+}
+function runEngineRequest(payloadObject) {
     const config = vscode.workspace.getConfiguration('ecdat');
     const extensionRoot = path.resolve(__dirname, '..');
     const configuredRoot = config.get('engineRoot', '').trim();
@@ -156,14 +202,7 @@ function runEngine(uri, text) {
     const hasBundledEngine = fs.existsSync(path.join(bundledRoot, 'backend', 'app', 'vscode_bridge.py'));
     const repositoryRoot = configuredRoot || (hasBundledEngine ? bundledRoot : path.resolve(extensionRoot, '..'));
     const python = config.get('pythonPath', 'python');
-    const relativePath = vscode.workspace.asRelativePath(uri, false).replaceAll('\\', '/');
-    const payload = JSON.stringify({
-        path: relativePath,
-        text,
-        sensitivity: config.get('dataSensitivity', 'pii'),
-        migration_complexity: config.get('migrationComplexity', 'standard_application'),
-        threat_timeline: config.get('threatTimeline', 15),
-    });
+    const payload = JSON.stringify(payloadObject);
     return new Promise((resolve, reject) => {
         const child = (0, node_child_process_1.spawn)(python, ['-m', 'backend.app.vscode_bridge'], { cwd: repositoryRoot, windowsHide: true });
         let output = '';
@@ -177,10 +216,13 @@ function runEngine(uri, text) {
                 if (code !== 0 || response.error)
                     reject(new Error(response.error || errors || 'ECDAT engine returned an error.'));
                 else
-                    resolve(response.findings || []);
+                    resolve({ ...response, findings: response.findings || [] });
             }
             catch {
-                reject(new Error(errors || 'ECDAT returned an unreadable result. Check the engine path.'));
+                const dependencyHint = errors.includes("No module named 'cryptography'")
+                    ? 'ECDAT full scanning requires the Python dependencies. Run: python -m pip install -r requirements.txt'
+                    : errors;
+                reject(new Error(dependencyHint || 'ECDAT returned an unreadable result. Check the engine path.'));
             }
         });
         child.stdin.end(payload);
@@ -241,6 +283,8 @@ function clearAll() {
     diagnostics.clear();
     updateStatus();
     refreshReport();
+    lastEngines = {};
+    lastInputType = 'source-file';
 }
 function showReport() {
     if (!reportPanel) {
@@ -255,6 +299,10 @@ function refreshReport() {
         return;
     const findings = allFindings().sort((a, b) => riskRank(a.risk) - riskRank(b.risk));
     const count = (risk) => findings.filter(item => item.risk === risk).length;
+    const engineLabels = Object.entries(lastEngines || {}).map(([name, detail]) => {
+        const state = detail.available === false ? 'unavailable' : detail.scan || detail.version || detail.provider || 'ready';
+        return `${name}: ${state}`;
+    }).join(' · ');
     const rows = findings.map(item => `
     <tr>
       <td><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.category)}</small></td>
@@ -271,7 +319,7 @@ function refreshReport() {
     td small{display:block;opacity:.65;margin-top:3px}.badge{text-transform:uppercase;font-size:10px;font-weight:700}.critical,.high{color:#e05c63}.medium{color:#d7a13d}.low{color:#47a884}.info{color:#6fa7c7}
     .empty{padding:45px 0;text-align:center;opacity:.7}@media(max-width:800px){.metrics{grid-template-columns:repeat(2,1fr)}table{display:block;overflow:auto}}
   </style></head><body>
-    <h1>ECDAT Cryptographic Report</h1><p class="sub">Local rule-based assessment. Validate findings before production security decisions.</p>
+    <h1>ECDAT Cryptographic Report</h1><p class="sub">${escapeHtml(lastInputType.replaceAll('-', ' '))}${engineLabels ? ` · ${escapeHtml(engineLabels)}` : ''}</p>
     <div class="metrics"><div class="metric"><b>${findings.length}</b><span>Total findings</span></div><div class="metric"><b>${count('critical')}</b><span>Critical</span></div><div class="metric"><b>${count('high')}</b><span>High</span></div><div class="metric"><b>${results.size}</b><span>Files with findings</span></div></div>
     ${findings.length ? `<table><thead><tr><th>Finding</th><th>Location</th><th>Risk</th><th>Quantum</th><th>Recommendation</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">Run an ECDAT file or workspace scan to populate this report.</div>'}
   </body></html>`;
@@ -299,6 +347,8 @@ async function exportCbom() {
         specification: 'ECDAT CBOM Prototype 1.0',
         generated_at: new Date().toISOString(),
         workspace: vscode.workspace.name || 'workspace',
+        input_type: lastInputType,
+        engines: lastEngines,
         files_with_findings: results.size,
         findings_count: findings.length,
         risk_distribution: riskDistribution,
