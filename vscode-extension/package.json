@@ -1,10 +1,14 @@
 {
-  "name": "ecdat-vscode",
-  "displayName": "ECDAT Cryptographic Scanner",
-  "description": "Local cryptographic discovery, risk diagnostics and CBOM export for VS Code.",
+  "name": "periperi",
+  "displayName": "Periperi",
+  "description": "Periperi: local cryptographic discovery, risk diagnostics and CBOM export for VS Code.",
   "version": "0.1.0",
   "publisher": "thesixbugs",
   "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rabindra789/periperi.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -20,11 +24,11 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      {"command": "ecdat.scanCurrentFile", "title": "ECDAT: Scan Current File"},
-      {"command": "ecdat.scanWorkspace", "title": "ECDAT: Scan Workspace"},
-      {"command": "ecdat.showReport", "title": "ECDAT: Show Cryptographic Report"},
-      {"command": "ecdat.exportCbom", "title": "ECDAT: Export CBOM"},
-      {"command": "ecdat.clearDiagnostics", "title": "ECDAT: Clear Findings"}
+      {"command": "ecdat.scanCurrentFile", "title": "Periperi: Scan Current File"},
+      {"command": "ecdat.scanWorkspace", "title": "Periperi: Scan Workspace"},
+      {"command": "ecdat.showReport", "title": "Periperi: Show Cryptographic Report"},
+      {"command": "ecdat.exportCbom", "title": "Periperi: Export CBOM"},
+      {"command": "ecdat.clearDiagnostics", "title": "Periperi: Clear Findings"}
     ],
     "menus": {
       "editor/context": [
@@ -83,11 +87,12 @@
     "watch": "tsc -watch -p ./",
     "check": "tsc --noEmit -p ./",
     "prepare-engine": "node scripts/prepare-engine.mjs",
-    "package": "npm run compile && npm run prepare-engine && npx --yes @vscode/vsce package --out ECDAT-Cryptographic-Scanner-0.1.0.vsix"
+    "package": "vsce package --out periperi-0.1.0.vsix"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^4.0.0",
     "typescript": "^5.7.2"
   }
 }
