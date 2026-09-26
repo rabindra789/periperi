@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .detector import make_finding
+from .recommendations import structured_recommendation
 
 
 CRYPTO_PACKAGES = {
@@ -63,12 +64,30 @@ def _crypto_library(package_name: str) -> str | None:
     return next((label for token, label in CRYPTO_PACKAGES.items() if token in lowered), None)
 
 
-def _finding(name: str, path: str, evidence: str, options: Any) -> dict[str, Any]:
+def _package_version(value: Any) -> str | None:
+    if value is None:
+        return None
+    version = str(value).strip()
+    return version if version and version.lower() != "unknown" else None
+
+
+def _finding(
+    name: str,
+    path: str,
+    evidence: str,
+    options: Any,
+    *,
+    version: str | None,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
     return make_finding(
         category="Library", name=name, path=path, line=0, evidence=evidence,
         sensitivity=options.sensitivity,
         migration_complexity=options.migration_complexity,
         threat_timeline=options.threat_timeline,
+        confidence=1.0,
+        metadata=metadata,
+        version=version,
     )
 
 
@@ -78,11 +97,20 @@ def findings_from_syft(payload: dict[str, Any], options: Any) -> list[dict[str, 
     for artifact in payload.get("artifacts", []):
         package_name = str(artifact.get("name", ""))
         library = _crypto_library(package_name)
-        version = str(artifact.get("version", "unknown"))
+        version = _package_version(artifact.get("version"))
         if library and (library, version) not in seen:
             findings.append(_finding(
-                library, "container-image",
-                f"Syft package inventory: {package_name} {version}", options,
+                library,
+                "container-image",
+                f"Syft package inventory: {package_name} {version or 'unknown'}",
+                options,
+                version=version,
+                metadata={
+                    "source": "syft",
+                    "package": package_name,
+                    "ecosystem": "container",
+                    "container": "container-image",
+                },
             ))
             seen.add((library, version))
     return findings
@@ -99,14 +127,29 @@ def findings_from_trivy(payload: dict[str, Any], options: Any) -> list[dict[str,
             identifier = str(vulnerability.get("VulnerabilityID", "unknown"))
             if not library or identifier in seen:
                 continue
+            installed_version = _package_version(vulnerability.get("InstalledVersion"))
             finding = _finding(
-                f"{library} package vulnerability", "container-image",
-                f"Trivy: {identifier} in {package_name} {vulnerability.get('InstalledVersion', 'unknown')}", options,
+                library,
+                "container-image",
+                f"Trivy: {identifier} in {package_name} {installed_version or 'unknown'}",
+                options,
+                version=installed_version,
+                metadata={
+                    "source": "trivy",
+                    "package": package_name,
+                    "vulnerability_id": identifier,
+                    "ecosystem": "container",
+                    "container": "container-image",
+                },
             )
             severity = str(vulnerability.get("Severity", "UNKNOWN")).upper()
             finding["risk"] = risk_map.get(severity, "info")
             finding["reason"] = f"Trivy reports a {severity.lower()} vulnerability in a cryptographic package."
             finding["recommendation"] = "Upgrade the affected package to the fixed version reported by Trivy and rebuild the image."
+            finding["recommendation_details"] = structured_recommendation(
+                finding["name"], "Library", finding["risk"],
+            )
+            finding["recommendation_details"]["action"] = finding["recommendation"]
             findings.append(finding)
             seen.add(identifier)
     return findings
