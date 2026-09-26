@@ -2,7 +2,7 @@
   "name": "periperi",
   "displayName": "Periperi",
   "description": "Periperi: local cryptographic discovery, risk diagnostics and CBOM export for VS Code.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "thesixbugs",
   "license": "UNLICENSED",
   "repository": {
@@ -89,7 +89,7 @@
     "watch": "tsc -watch -p ./",
     "check": "tsc --noEmit -p ./",
     "prepare-engine": "node scripts/prepare-engine.mjs",
-    "package": "vsce package --out periperi-0.2.0.vsix"
+    "package": "vsce package --out periperi-0.3.0.vsix"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
