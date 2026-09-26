@@ -24,11 +24,11 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      {"command": "ecdat.scanCurrentFile", "title": "ECDAT: Scan Current File"},
-      {"command": "ecdat.scanWorkspace", "title": "ECDAT: Scan Workspace"},
-      {"command": "ecdat.showReport", "title": "ECDAT: Show Cryptographic Report"},
-      {"command": "ecdat.exportCbom", "title": "ECDAT: Export CBOM"},
-      {"command": "ecdat.clearDiagnostics", "title": "ECDAT: Clear Findings"}
+      {"command": "ecdat.scanCurrentFile", "title": "Periperi: Scan Current File"},
+      {"command": "ecdat.scanWorkspace", "title": "Periperi: Scan Workspace"},
+      {"command": "ecdat.showReport", "title": "Periperi: Show Cryptographic Report"},
+      {"command": "ecdat.exportCbom", "title": "Periperi: Export CBOM"},
+      {"command": "ecdat.clearDiagnostics", "title": "Periperi: Clear Findings"}
     ],
     "menus": {
       "editor/context": [
