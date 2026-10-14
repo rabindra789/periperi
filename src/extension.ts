@@ -39,6 +39,7 @@ type EngineResponse = {
   input_type?: string
   files_scanned?: number
   files_skipped?: number
+  analysis?: { engine_version?: string; schema?: string; python?: string }
 }
 type EngineProgress = {
   phase: string
@@ -46,6 +47,8 @@ type EngineProgress = {
   total: number
   message: string
 }
+
+const FALLBACK_SCHEMA = 'ECDAT CBOM Prototype 1.1'
 
 const supportedExtensions = new Set([
   '.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.c', '.cpp', '.h', '.hpp', '.go', '.rs',
@@ -60,6 +63,7 @@ const results = new Map<string, FileResult>()
 let statusItem: vscode.StatusBarItem
 let reportPanel: vscode.WebviewPanel | undefined
 let lastEngines: EngineResponse['engines'] = {}
+let lastAnalysis: EngineResponse['analysis'] = {}
 let lastInputType = 'source-file'
 let lastScanCompleted = false
 
@@ -116,6 +120,7 @@ async function scanDocument(document: vscode.TextDocument, announce: boolean): P
     const response = await runEngine(document.uri, document.getText())
     const findings = response.findings
     lastEngines = response.engines || lastEngines
+    lastAnalysis = response.analysis || lastAnalysis
     lastInputType = response.input_type || 'source-file'
     lastScanCompleted = true
     results.set(document.uri.toString(), { uri: document.uri, findings })
@@ -151,10 +156,12 @@ async function scanWorkspace(): Promise<void> {
     }, progress => {
       const reportProgress = createProgressReporter(progress)
       reportProgress({ phase: 'preparing', count: 0, total: 0, message: 'Preparing workspace scan' })
-      return runEngineRequest({ ...engineOptions(), mode: 'workspace', path: folder.uri.fsPath }, reportProgress)
+      const maxFiles = vscode.workspace.getConfiguration('ecdat').get<number>('maxWorkspaceFiles', 2000)
+      return runEngineRequest({ ...engineOptions(), mode: 'workspace', path: folder.uri.fsPath, max_files: maxFiles }, reportProgress)
     })
     results.set(folder.uri.toString(), { uri: folder.uri, findings: response.findings })
     lastEngines = response.engines || {}
+    lastAnalysis = response.analysis || lastAnalysis
     lastInputType = response.input_type || 'workspace'
     lastScanCompleted = true
     const byFile = new Map<string, Finding[]>()
@@ -206,6 +213,7 @@ async function scanArtifact(): Promise<void> {
     diagnostics.clear()
     results.set(selected[0].toString(), { uri: selected[0], findings: response.findings })
     lastEngines = response.engines || {}
+    lastAnalysis = response.analysis || lastAnalysis
     lastInputType = response.input_type || 'artifact'
     lastScanCompleted = true
     updateStatus()
@@ -445,10 +453,15 @@ function buildCbomReport(findings: Finding[]): Record<string, unknown> {
     return counts
   }, {})
   return {
-    specification: 'ECDAT CBOM Prototype 1.0',
+    specification: lastAnalysis?.schema || FALLBACK_SCHEMA,
     generated_at: new Date().toISOString(),
     workspace: vscode.workspace.name || 'workspace',
     input_type: lastInputType,
+    engine: {
+      version: lastAnalysis?.engine_version || null,
+      python: lastAnalysis?.python || null,
+      schema: lastAnalysis?.schema || FALLBACK_SCHEMA,
+    },
     engines: lastEngines,
     files_with_findings: results.size,
     findings_count: findings.length,
@@ -492,6 +505,7 @@ function clearAll(): void {
   updateStatus()
   refreshReport()
   lastEngines = {}
+  lastAnalysis = {}
   lastInputType = 'source-file'
   lastScanCompleted = false
 }
@@ -548,7 +562,7 @@ function refreshReport(): void {
     .cbom-report{border:1px solid var(--vscode-panel-border);margin:0 0 22px;padding:16px}.cbom-report h2{font-size:17px;margin:0 0 4px}.cbom-report p{opacity:.7;margin:0 0 12px;font-size:12px}.cbom-report pre{background:var(--vscode-textCodeBlock-background);padding:12px;max-height:360px;overflow:auto;font-size:11px;white-space:pre-wrap;word-break:break-word}
     .empty{padding:45px 0;text-align:center;opacity:.7}@media(max-width:800px){.metrics{grid-template-columns:repeat(2,1fr)}table{display:block;overflow:auto}}
   </style></head><body>
-    <h1>ECDAT Cryptographic Report</h1><p class="sub">${escapeHtml(lastInputType.replaceAll('-', ' '))}${engineLabels ? ` · ${escapeHtml(engineLabels)}` : ''}</p>
+    <h1>ECDAT Cryptographic Report</h1><p class="sub">${escapeHtml(lastInputType.replaceAll('-', ' '))}${lastAnalysis?.engine_version ? ` · engine ${escapeHtml(lastAnalysis.engine_version)}` : ''}${engineLabels ? ` · ${escapeHtml(engineLabels)}` : ''}</p>
     <div class="metrics"><div class="metric"><b>${findings.length}</b><span>Total findings</span></div><div class="metric"><b>${count('critical')}</b><span>Critical</span></div><div class="metric"><b>${count('high')}</b><span>High</span></div><div class="metric"><b>${results.size}</b><span>Files with findings</span></div></div>
     <section class="cbom-report"><h2>CBOM report</h2><p>Preview of the generated CBOM. Run <strong>ECDAT: Export CBOM</strong> to save the complete report as JSON.</p><pre>${cbomPreview}</pre></section>
     ${findings.length ? `<table><thead><tr><th>Finding</th><th>Location</th><th>Risk</th><th>Quantum</th><th>Recommendation</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">Run an ECDAT file or workspace scan to populate this report.</div>'}

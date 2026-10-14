@@ -16,22 +16,24 @@ Everything runs on your machine. The extension spawns a local Python process, pa
 ## Repository layout
 
 ```
-periperi/
-├── requirements.txt              Python dependency for full scanning (cryptography>=42)
-└── vscode-extension/             The VS Code extension
-    ├── package.json              Manifest: commands, menus, ecdat.* settings
-    ├── readme.md                 User-facing documentation (also the marketplace page)
-    ├── .vscodeignore             What is excluded from the packaged .vsix
-    ├── .vscode/                  F5 launch config and the npm: compile task
-    ├── out/extension.js          Committed compiled bundle (TypeScript sources are absent)
-    └── engine/backend/app/       The ECDAT Python engine
-        ├── vscode_bridge.py      JSON stdin/stdout entrypoint
-        ├── scanner.py            Safe traversal, archive extraction, size limits
-        ├── detector.py           Source-text pattern detection (standard library only)
-        ├── openssl_inspector.py  X.509 / PEM / DER / PKCS#12 parsing, binary fingerprinting
-        ├── container_tools.py    Syft and Trivy adapters
-        ├── risk.py               Classical rules and Mosca X + Y > Z quantum scoring
-        └── recommendations.py    Remediation text per finding
+periperi/                         The VS Code extension (repository root)
+├── package.json                  Manifest: commands, menus, ecdat.* settings
+├── README.md                     User-facing documentation (also the marketplace page)
+├── CHANGELOG.md                  Release notes
+├── .vscodeignore                 What is excluded from the packaged .vsix
+├── tsconfig.json                 TypeScript build config
+├── src/extension.ts              Extension source (activation, commands, report, CBOM)
+├── out/extension.js              Compiled bundle loaded by VS Code
+└── engine/                       Bundled engine
+    ├── backend/app/              Python engine
+    │   ├── vscode_bridge.py      JSON stdin/stdout entrypoint
+    │   ├── scanner.py            Safe traversal, archive extraction, size limits
+    │   ├── detector.py           Source-text pattern detection (standard library only)
+    │   ├── openssl_inspector.py  X.509 / PEM / DER / PKCS#12 parsing, binary fingerprinting
+    │   ├── container_tools.py    Syft and Trivy adapters
+    │   ├── risk.py               Classical rules and Mosca X + Y > Z quantum scoring
+    │   └── recommendations.py    Remediation text per finding
+    └── runtime/                  Per-platform Python runtime (generated, git-ignored)
 ```
 
 ## Quick start
@@ -39,37 +41,40 @@ periperi/
 ```powershell
 git clone https://github.com/rabindra789/periperi.git
 cd periperi
-python -m pip install -r requirements.txt        # optional: only needed for full scanning
-cd vscode-extension
 npm install
-npm run package                                   # -> periperi-0.2.0.vsix
+npm run check                # typecheck src/extension.ts
+npm run compile              # src/ -> out/extension.js
+npm run prepare-engine       # optional: bundle cryptography for each platform (requires uv)
+npm run package              # -> periperi-0.3.3.vsix
 ```
+
+`npm run prepare-engine` needs [`uv`](https://docs.astral.sh/uv/) on `PATH` (or `ECDAT_UV_PATH`) and a network connection; it rebuilds `engine/runtime/` from the committed `engine/backend` sources. It is only required to ship the self-contained runtime — the engine also falls back to a system Python that has the `cryptography` package installed.
 
 Install the result through **Extensions: Install from VSIX...** in VS Code, then run **Periperi: Scan Current File**. Downloads for released versions are on the [releases page](https://github.com/rabindra789/periperi/releases).
 
-Full usage, settings, detection coverage and the risk model are documented in [`vscode-extension/readme.md`](vscode-extension/readme.md).
+Full usage is available from the `Periperi:` commands in the command palette, and settings are under `periperi.*` (for example `periperi.maxWorkspaceFiles`).
 
 ## Using the engine directly
 
 The engine is a plain Python package and can be driven without VS Code:
 
 ```powershell
-cd vscode-extension\engine
+cd engine
 '{"mode":"text","path":"demo.py","text":"import hashlib`nhashlib.md5(b""x"")"}' |
     python -m backend.app.vscode_bridge
 ```
 
-Request fields: `mode` (`text` | `workspace` | `artifact`), `path`, `text`, `sensitivity`, `migration_complexity`, `threat_timeline`. The response is a single JSON object on stdout; failures are returned as `{"error": "..."}` with exit code 1.
+Request fields: `mode` (`text` | `workspace` | `artifact`), `path`, `text`, `max_files`, `sensitivity`, `migration_complexity`, `threat_timeline`. The response is a single JSON object on stdout; failures are returned as `{"error": "..."}` with exit code 1.
 
 ## Releases
 
-- Versions follow the manifest in `vscode-extension/package.json`; the packaged filename and the git tag share the number (`v0.2.0` → `periperi-0.2.0.vsix`).
+- Versions follow the manifest in `package.json`; the packaged filename and the git tag share the number (`v0.3.3` → `periperi-0.3.3.vsix`).
 - `npm run package` builds the `.vsix` from the committed `out/extension.js`, and the release notes are the long-form entry in [`CHANGELOG.md`](CHANGELOG.md).
-- Because the TypeScript sources are not in this repository, the bundle cannot currently be recompiled — see the [Development section](vscode-extension/readme.md#development) for what that means for contributors.
+- Run `npm run prepare-engine` before packaging to include the self-contained Python runtime in the `.vsix`.
 
 ## Contributing
 
-Issues and pull requests are welcome. Please state the Periperi version, your VS Code, Python, Syft and Trivy versions, and the exact command you ran. Because the bundle is committed compiled output, changes to extension behaviour currently have to be made by rebuilding and committing `out/extension.js` alongside `package.json`.
+Issues and pull requests are welcome. Please state the Periperi version, your VS Code, Python, Syft and Trivy versions, and the exact command you ran. Extension behaviour is written in `src/extension.ts`; run `npm run compile` and commit the regenerated `out/extension.js` alongside `package.json`.
 
 ## Licence
 
