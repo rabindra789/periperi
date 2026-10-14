@@ -114,6 +114,7 @@ LIFECYCLE_KEYS = (
     "key_usage",
     "untrusted_exponent",
     "weak_curve",
+    "unvalidated_key",
 )
 
 #: Short references surfaced with each finding and exported in the CBOM.
@@ -215,6 +216,8 @@ def classical_risk(
     detail = detail or {}
 
     if category == "Key" and "PRIVATE" in upper:
+        if detail.get("unvalidated_key"):
+            return "medium", "A private-key PEM header appears in text that does not parse as a complete private key; confirm whether real key material is present."
         return "critical", "Private-key material appears to be stored with the project."
     if detail.get("expired"):
         return "critical", "The certificate has expired, so every relying party will reject it."

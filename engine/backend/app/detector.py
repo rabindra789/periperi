@@ -105,6 +105,7 @@ CERTIFICATE_SUFFIXES = {".pem", ".crt", ".cer", ".der", ".p7b", ".p12", ".pfx"}
 KEY_SUFFIXES = {".key", ".jks", ".keystore"}
 PRIVATE_KEY_RE = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----", re.I)
 PUBLIC_KEY_RE = re.compile(r"-----BEGIN (?:RSA )?PUBLIC KEY-----", re.I)
+PEM_BOUNDARY_RE = re.compile(r"-----BEGIN [A-Z0-9 ]+-----|-----END [A-Z0-9 ]+-----")
 INACTIVE_AFTER_RE = re.compile(
     r"(?i)\b(?:has\s+been|have\s+been|was|were|is|are|will\s+be|remains?|stays?)?\s*"
     r"(?:disable(?:d)?|not\s+(?:enabled|used|in\s+use|configured|supported|available)|"
@@ -150,6 +151,27 @@ def _pattern_confidence(category: str, name: str) -> float:
     if name in {"Cipher suite", "Certificate pinning"}:
         confidence = 0.7
     return confidence
+
+
+def _private_key_is_validated(text: str) -> bool:
+    """Return True only when ``text`` parses as an actual private key.
+
+    A bare ``-----BEGIN ... PRIVATE KEY-----`` header can appear in comments,
+    documentation, tests or string literals. Importing the OpenSSL backend is
+    optional here (text mode is otherwise standard-library only), so a missing
+    backend or a parse failure returns False and the finding stays a candidate.
+    """
+    if "PRIVATE KEY-----" not in text or len(text) > 1_000_000:
+        return False
+    try:
+        from cryptography.hazmat.primitives import serialization
+    except Exception:
+        return False
+    try:
+        serialization.load_pem_private_key(text.encode("utf-8", "ignore"), password=None)
+    except Exception:
+        return False
+    return True
 
 
 def _make_finding(
@@ -242,17 +264,21 @@ def detect_file(
             confidence=0.9, metadata={"source": "key_file_suffix"},
         ))
 
+    private_key_validated = _private_key_is_validated(text)
     lines = text.splitlines()
     for number, line in enumerate(lines, start=1):
         algorithms_on_line: set[str] = set()
         if PRIVATE_KEY_RE.search(line):
             key = ("Key", "Private key detected", number)
             if key not in seen:
+                metadata = {"private_material": "redacted", "source": "pem_header"}
+                if not private_key_validated:
+                    metadata["unvalidated_key"] = True
                 findings.append(_make_finding(
                     category="Key", name="Private key detected", path=relative_path, line=number,
                     evidence=_safe_evidence(line, "private-key header", True), sensitivity=sensitivity,
                     migration_complexity=migration_complexity, threat_timeline=threat_timeline,
-                    confidence=1.0, metadata={"private_material": "redacted", "source": "pem_header"},
+                    confidence=1.0 if private_key_validated else 0.5, metadata=metadata,
                 ))
                 seen.add(key)
         elif PUBLIC_KEY_RE.search(line):
@@ -265,6 +291,8 @@ def detect_file(
                     confidence=1.0, metadata={"source": "pem_header"},
                 ))
                 seen.add(key)
+        if PEM_BOUNDARY_RE.search(line):
+            continue
 
         siv_spans = [
             siv_match.span()

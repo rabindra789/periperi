@@ -27,6 +27,8 @@ def recommendation(name: str, category: str, risk: str, detail: dict[str, Any] |
     detail = detail or {}
 
     if category == "Key" and "PRIVATE" in upper:
+        if detail.get("unvalidated_key"):
+            return "Confirm whether this PEM header is real key material; if it is, remove it, rotate it, and use a managed secret or key store."
         return "Remove the key from the project, rotate it, and use a managed secret or key store."
     if detail.get("expired"):
         return "Replace or renew this certificate now; relying parties will reject it while it is expired."
@@ -86,7 +88,7 @@ def structured_recommendation(
     target = _migration_target(name)
 
     if category == "Key" and "PRIVATE" in upper:
-        migration_type = "credential_rotation"
+        migration_type = "key_material_triage" if detail.get("unvalidated_key") else "credential_rotation"
         complexity = "high"
         performance = {"level": "low", "description": "Rotation can be coordinated without changing cryptographic throughput."}
     elif detail.get("expired") or detail.get("expiring_soon"):

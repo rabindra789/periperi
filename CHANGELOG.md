@@ -2,6 +2,18 @@
 
 All notable changes to Periperi are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- Private-key findings are no longer rated `critical` on a bare `-----BEGIN ... PRIVATE KEY-----` header. A header that does not parse as a real key is now a `medium` candidate carrying `unvalidated_key` metadata, while a parseable private key stays `critical`; the recommendation distinguishes triage from rotation.
+- Lines that are PEM block boundaries (`-----BEGIN/END ...-----`) no longer emit redundant algorithm matches such as `RSA` on a key header/footer line.
+
+### Changed
+
+- Added a deterministic false-positive regression corpus and runner under `engine/tests/`, with results in `docs/ACCURACY_BASELINE.md`.
+- `engine/runtime/` is now git-ignored build output produced by `npm run prepare-engine`, and `package-lock.json` is committed so `npm ci` is reproducible.
+
 ## [0.2.0] — 2026-09-26
 
 Extension ID: `thesixbugs.periperi` · Asset: `periperi-0.2.0.vsix`
