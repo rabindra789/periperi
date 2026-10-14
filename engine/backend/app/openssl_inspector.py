@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.serialization import pkcs12
 from cryptography.x509.oid import ExtensionOID
 
 from .detector import make_finding
+from . import evidence as evidence_model
 
 
 BINARY_SUFFIXES = {
@@ -102,6 +103,9 @@ def _finding(
     confidence: float = 0.9,
     metadata: dict[str, Any] | None = None,
     version: str | None = None,
+    evidence_type: str = evidence_model.EV_STRUCTURED,
+    usage_context: str = "unknown",
+    validation_state: str = "validated",
 ) -> dict[str, Any]:
     return make_finding(
         category=category,
@@ -115,6 +119,9 @@ def _finding(
         confidence=confidence,
         metadata=metadata,
         version=version,
+        evidence_type=evidence_type,
+        usage_context=usage_context,
+        validation_state=validation_state,
     )
 
 
@@ -432,6 +439,7 @@ def inspect_binary(relative_path: str, data: bytes, options: Any) -> list[dict[s
             findings.append(_finding(
                 category, finding_name, relative_path, f"Binary symbol/string: {token}", options,
                 confidence=0.9, metadata=metadata,
+                evidence_type=evidence_model.EV_BINARY, usage_context="unknown", validation_state="unresolved",
             ))
             seen.add((category, finding_name))
             if category == "Algorithm":

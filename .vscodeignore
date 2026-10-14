@@ -11,3 +11,4 @@ tsconfig.json
 **/__pycache__/**
 **/*.pyc
 **/*.pyo
+test_projects/**

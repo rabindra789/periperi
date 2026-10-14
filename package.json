@@ -3,7 +3,7 @@
   "displayName": "Periperi",
   "icon": "images/logo.png",
   "description": "Periperi: local cryptographic discovery, risk diagnostics and CBOM export for VS Code.",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "publisher": "thesixbugs",
   "license": "UNLICENSED",
   "repository": {

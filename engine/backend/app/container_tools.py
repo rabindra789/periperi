@@ -88,6 +88,9 @@ def _finding(
         confidence=1.0,
         metadata=metadata,
         version=version,
+        evidence_type=evidence_model.EV_CONTAINER,
+        usage_context="configuration",
+        validation_state="observed",
     )
 
 

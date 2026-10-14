@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import evidence as evidence_model
+
 
 DATA_LIFETIME_YEARS = {
     "ephemeral": 1,
@@ -364,13 +366,40 @@ def quantum_risk(
     return mosca_risk(algorithm, sensitivity, migration_complexity, threat_timeline)
 
 
+def inventory_quantum(threat_timeline: int, reason: str) -> dict[str, Any]:
+    """A not-applicable Mosca result for candidate/inventory findings.
+
+    Quantum migration priority is only meaningful for cryptography that is
+    actually present or in use, so candidate mentions do not get a Mosca score.
+    """
+    return {
+        "level": "not_applicable",
+        "reason": reason,
+        "family": None,
+        "post_quantum": False,
+        "x": None,
+        "y": None,
+        "z": threat_timeline,
+        "margin": None,
+        "migration_target": None,
+        "references": [],
+    }
+
+
 def risk_rank(risk: str) -> int:
     """Sort key for the classical levels, most severe first."""
     return RISK_ORDER.index(risk) if risk in RISK_ORDER else len(RISK_ORDER)
 
 
 def summary(findings: list[dict[str, Any]]) -> dict[str, Any]:
-    """Aggregate findings into the counters reported by the bridge and CBOM."""
+    """Aggregate findings into the counters reported by the bridge and CBOM.
+
+    ``occurrences`` counts every finding; ``unique_issues`` collapses findings
+    that share a deterministic ``group_id`` (same rule + file + component) so a
+    repeated mention is not mistaken for a distinct issue. The evidence
+    sub-counts keep candidates, inventory and validated items separate from the
+    classical and quantum distributions.
+    """
     classical: dict[str, int] = {level: 0 for level in RISK_ORDER}
     quantum: dict[str, int] = {}
     categories: dict[str, int] = {}
@@ -386,15 +415,21 @@ def summary(findings: list[dict[str, Any]]) -> dict[str, Any]:
         level_confidence = str(finding.get("confidence_level", ""))
         if level_confidence in confidences:
             confidences[level_confidence] += 1
-        path = str(finding.get("file", ""))
-        if path:
-            files.add(path)
+        file = finding.get("file")
+        if file:
+            files.add(str(file))
+    evidence_counts = evidence_model.summarize_evidence(findings)
     return {
         "findings": len(findings),
         "files_with_findings": len(files),
-        "risk_distribution": {level: count for level, count in classical.items() if count},
+        "risk_distribution": {level: classical[level] for level in RISK_ORDER if classical[level]},
         "quantum_distribution": dict(sorted(quantum.items())),
         "category_distribution": dict(sorted(categories.items())),
         "confidence_distribution": {level: count for level, count in confidences.items() if count},
         "urgent": classical.get("critical", 0) + classical.get("high", 0),
+        "occurrences": evidence_counts["occurrences"],
+        "unique_issues": evidence_counts["unique_issues"],
+        "validation_states": evidence_counts["validation_states"],
+        "file_roles": evidence_counts["file_roles"],
+        "usage_contexts": evidence_counts["usage_contexts"],
     }

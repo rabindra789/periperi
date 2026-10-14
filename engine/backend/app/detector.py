@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from .recommendations import recommendation, structured_recommendation
-from .risk import classical_risk, lifecycle_detail, quantum_risk, references_for
+from .risk import classical_risk, inventory_quantum, lifecycle_detail, quantum_risk, references_for
+from . import evidence as evidence_model
 
 
 PATTERNS: list[tuple[str, str, str]] = [
@@ -101,8 +102,8 @@ PATTERN_CONFIDENCE: dict[str, float] = {
     "Token": 0.75,
 }
 
-CERTIFICATE_SUFFIXES = {".pem", ".crt", ".cer", ".der", ".p7b", ".p12", ".pfx"}
-KEY_SUFFIXES = {".key", ".jks", ".keystore"}
+CERTIFICATE_SUFFIXES = evidence_model.CERT_SUFFIXES
+KEY_SUFFIXES = evidence_model.KEY_SUFFIXES
 PRIVATE_KEY_RE = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----", re.I)
 PUBLIC_KEY_RE = re.compile(r"-----BEGIN (?:RSA )?PUBLIC KEY-----", re.I)
 PEM_BOUNDARY_RE = re.compile(r"-----BEGIN [A-Z0-9 ]+-----|-----END [A-Z0-9 ]+-----")
@@ -178,19 +179,42 @@ def _make_finding(
     *, category: str, name: str, path: str, line: int, evidence: str,
     sensitivity: str, migration_complexity: str, threat_timeline: int,
     confidence: float = 0.8, metadata: dict[str, Any] | None = None,
-    version: str | None = None,
+    version: str | None = None, evidence_type: str | None = None,
+    usage_context: str | None = None, validation_state: str | None = None,
+    component_identity: str | None = None, provenance: str | None = None,
 ) -> dict[str, Any]:
     detail = lifecycle_detail(metadata)
-    risk, why = classical_risk(name, category, detail)
-    q = quantum_risk(name if category == "Algorithm" else None, sensitivity, migration_complexity, threat_timeline)
+    file_role = evidence_model.classify_file(path)
+    suffix = evidence_model.suffix_of(path.replace("\\", "/").rsplit("/", 1)[-1])
+    if evidence_type is None:
+        evidence_type = evidence_model.EV_TEXT
+    if usage_context is None:
+        usage_context = evidence_model.default_context(file_role)
+
+    base_risk, why = classical_risk(name, category, detail)
+    risk, context_reason = evidence_model.severity_for(base_risk, evidence_type, usage_context, file_role)
+    if context_reason:
+        why = f"{why} {context_reason}".strip()
+    state = validation_state or evidence_model.resolve_state(evidence_type, risk, usage_context)
+
+    if state in {evidence_model.ST_CANDIDATE, evidence_model.ST_UNRESOLVED}:
+        q = inventory_quantum(
+            threat_timeline,
+            "Quantum migration priority is only calculated for validated or actively-used cryptography, not for candidate inventory mentions.",
+        )
+    else:
+        q = quantum_risk(name if category == "Algorithm" else None, sensitivity, migration_complexity, threat_timeline)
+
     confidence = round(min(1.0, max(0.0, float(confidence))), 2)
+    normalized_path = path.replace("\\", "/")
+    rule = evidence_model.make_rule_id(category, name)
     return {
         "type": category.lower(),
         "category": category,
         "name": name,
         "algorithm": name if category == "Algorithm" else None,
         "version": version,
-        "file": path.replace("\\", "/"),
+        "file": normalized_path,
         "line": line,
         "evidence": evidence,
         "confidence": confidence,
@@ -204,6 +228,18 @@ def _make_finding(
         "references": references_for(name, category, detail),
         "recommendation": recommendation(name, category, risk, detail),
         "recommendation_details": structured_recommendation(name, category, risk, detail),
+        "rule_id": rule,
+        "evidence_type": evidence_type,
+        "validation_state": state,
+        "confidence_reason": evidence_model.confidence_reason(
+            evidence_type, usage_context, file_role, state == evidence_model.ST_VALIDATED
+        ),
+        "usage_context": usage_context,
+        "file_role": file_role,
+        "component_identity": component_identity,
+        "provenance": provenance or evidence_model.provenance_for(evidence_type),
+        "group_id": evidence_model.make_group_id(rule, normalized_path, component_identity),
+        "related_findings": [],
     }
 
 
@@ -246,6 +282,8 @@ def detect_file(
     seen: set[tuple[str, str, int]] = set()
 
     suffix = path.suffix.lower()
+    file_role = evidence_model.classify_file(relative_path)
+    evidence_model.reset_docstring_state(relative_path, suffix)
     is_certificate = suffix in CERTIFICATE_SUFFIXES and (
         suffix != ".pem" or "-----BEGIN CERTIFICATE-----" in text
     )
@@ -271,24 +309,35 @@ def detect_file(
         if PRIVATE_KEY_RE.search(line):
             key = ("Key", "Private key detected", number)
             if key not in seen:
+                header_match = PRIVATE_KEY_RE.search(line)
+                context = evidence_model.classify_usage(line, header_match.start() if header_match else 0, suffix, file_role, relative_path)
                 metadata = {"private_material": "redacted", "source": "pem_header"}
-                if not private_key_validated:
+                if private_key_validated:
+                    evidence_type = evidence_model.EV_STRUCTURED
+                    validation_state = evidence_model.ST_VALIDATED
+                else:
                     metadata["unvalidated_key"] = True
+                    evidence_type = evidence_model.EV_TEXT
+                    validation_state = evidence_model.ST_CANDIDATE
                 findings.append(_make_finding(
                     category="Key", name="Private key detected", path=relative_path, line=number,
                     evidence=_safe_evidence(line, "private-key header", True), sensitivity=sensitivity,
                     migration_complexity=migration_complexity, threat_timeline=threat_timeline,
                     confidence=1.0 if private_key_validated else 0.5, metadata=metadata,
+                    evidence_type=evidence_type, usage_context=context, validation_state=validation_state,
                 ))
                 seen.add(key)
         elif PUBLIC_KEY_RE.search(line):
             key = ("Key", "Public key detected", number)
             if key not in seen:
+                public_match = PUBLIC_KEY_RE.search(line)
+                context = evidence_model.classify_usage(line, public_match.start() if public_match else 0, suffix, file_role, relative_path)
                 findings.append(_make_finding(
                     category="Key", name="Public key detected", path=relative_path, line=number,
                     evidence="Public-key PEM header", sensitivity=sensitivity,
                     migration_complexity=migration_complexity, threat_timeline=threat_timeline,
-                    confidence=1.0, metadata={"source": "pem_header"},
+                    confidence=0.6, metadata={"source": "pem_header"},
+                    evidence_type=evidence_model.EV_TEXT, usage_context=context,
                 ))
                 seen.add(key)
         if PEM_BOUNDARY_RE.search(line):
@@ -345,6 +394,7 @@ def detect_file(
                     migration_complexity=migration_complexity, threat_timeline=threat_timeline,
                     confidence=_pattern_confidence(category, name),
                     metadata={"source": "source_pattern", "matched_token": match.group(0)[:80]},
+                    usage_context=evidence_model.classify_usage(line, match.start(), suffix, file_role, relative_path),
                 ))
                 seen.add(key)
                 if category == "Algorithm":

@@ -43,9 +43,9 @@ git clone https://github.com/rabindra789/periperi.git
 cd periperi
 npm install
 npm run check                # typecheck src/extension.ts
-npm run compile              # src/ -> out/extension.js
+npm run compile              # src/->out/extension.js
 npm run prepare-engine       # optional: bundle cryptography for each platform (requires uv)
-npm run package              # -> periperi-0.3.3.vsix
+npm run package              # -> periperi-0.4.0.vsix
 ```
 
 `npm run prepare-engine` needs [`uv`](https://docs.astral.sh/uv/) on `PATH` (or `ECDAT_UV_PATH`) and a network connection; it rebuilds `engine/runtime/` from the committed `engine/backend` sources. It is only required to ship the self-contained runtime — the engine also falls back to a system Python that has the `cryptography` package installed.
@@ -68,7 +68,7 @@ Request fields: `mode` (`text` | `workspace` | `artifact`), `path`, `text`, `max
 
 ## Releases
 
-- Versions follow the manifest in `package.json`; the packaged filename and the git tag share the number (`v0.3.3` → `periperi-0.3.3.vsix`).
+- Versions follow the manifest in `package.json`; the packaged filename and the git tag share the number (`v0.4.0` → `periperi-0.4.0.vsix`).
 - `npm run package` builds the `.vsix` from the committed `out/extension.js`, and the release notes are the long-form entry in [`CHANGELOG.md`](CHANGELOG.md).
 - Run `npm run prepare-engine` before packaging to include the self-contained Python runtime in the `.vsix`.
 

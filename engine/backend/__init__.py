@@ -6,9 +6,9 @@ extension. The sources live at ``engine/backend`` inside the extension, and
 ``engine/runtime`` without modifying these files.
 """
 
-__version__ = "0.3.3"
+__version__ = "0.4.0"
 
 #: Schema identifier written into every bridge response and CBOM export.
-SCHEMA_VERSION = "ECDAT CBOM Prototype 1.1"
+SCHEMA_VERSION = "ECDAT CBOM Prototype 1.2"
 
 __all__ = ["__version__", "SCHEMA_VERSION"]

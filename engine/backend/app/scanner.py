@@ -14,6 +14,7 @@ from typing import Any
 from .container_tools import container_tool_details, scan_container_with_tools
 from .dependencies import is_cryptographic_dependency, is_manifest, parse_manifest
 from .detector import CERTIFICATE_SUFFIXES, KEY_SUFFIXES, detect_file, make_finding
+from . import evidence as evidence_model
 from .openssl_inspector import (
     BINARY_SUFFIXES,
     inspect_binary,
@@ -76,6 +77,35 @@ class ScanOptions:
     max_files: int = MAX_FILES
 
 
+PERIPERI_SELF_SCAN_MARKERS = {
+    "engine/backend/app/detector.py",
+    "engine/backend/app/scanner.py",
+    "engine/backend/app/evidence.py",
+    "package.json",
+}
+
+
+def _is_periperi_self_scan(root: Path) -> bool:
+    """Check if the scan root is the Periperi repository itself."""
+    for marker in PERIPERI_SELF_SCAN_MARKERS:
+        if not (root / marker).exists():
+            return False
+    try:
+        pkg = (root / "package.json").read_text(encoding="utf-8")
+        if '"name": "periperi"' not in pkg and '"name": "periperi",' not in pkg:
+            return False
+    except OSError:
+        return False
+    return True
+
+
+def _get_self_scan_exclusions(root: Path) -> set[str]:
+    """Return additional directory exclusions for Periperi self-scan."""
+    if _is_periperi_self_scan(root):
+        return {"engine", "backend"}
+    return set()
+
+
 def _is_supported(path: Path) -> bool:
     return (
         path.suffix.lower() in TEXT_SUFFIXES
@@ -88,11 +118,12 @@ def _is_supported(path: Path) -> bool:
 
 
 def _project_entry_count(root: Path) -> int:
+    effective_skip_dirs = SKIP_DIRS | _get_self_scan_exclusions(root)
     total = 0
     for path in root.rglob("*"):
         relative = path.relative_to(root)
         if path.is_symlink() or (
-            path.is_file() and not any(part in SKIP_DIRS for part in relative.parts)
+            path.is_file() and not any(part in effective_skip_dirs for part in relative.parts)
         ):
             total += 1
             if total > MAX_FILES:
@@ -129,6 +160,9 @@ def _dependency_findings(
                 "scope": dependency["scope"],
                 "crypto_relevant": crypto_relevant,
             },
+            evidence_type=evidence_model.EV_MANIFEST,
+            usage_context="configuration",
+            validation_state="observed",
         ))
     return findings
 
@@ -142,6 +176,9 @@ def scan_project(
 ) -> dict[str, Any]:
     if not root.exists() or not root.is_dir():
         raise ScanError("The selected project directory does not exist.")
+
+    self_scan_exclusions = _get_self_scan_exclusions(root)
+    effective_skip_dirs = SKIP_DIRS | self_scan_exclusions
 
     callback = _select_progress(progress, progress_callback)
     if callback is None:
@@ -165,7 +202,7 @@ def scan_project(
             files_skipped += 1
             _emit_progress(callback, "scanning", files_scanned + files_skipped, total, "Scanning project files")
             continue
-        if not path.is_file() or any(part in SKIP_DIRS for part in relative.parts):
+        if not path.is_file() or any(part in effective_skip_dirs for part in relative.parts):
             continue
         if not _is_supported(path):
             files_skipped += 1

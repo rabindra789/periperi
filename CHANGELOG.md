@@ -2,6 +2,44 @@
 
 All notable changes to Periperi are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses semantic versioning.
 
+## [0.4.0] — 2026-10-14
+
+### Fixed
+
+- Private-key findings are no longer rated `critical` on a bare `-----BEGIN ... PRIVATE KEY-----` header. A header that does not parse as a real key is now a `medium` candidate carrying `unvalidated_key` metadata, while a parseable private key stays `critical`; the recommendation distinguishes triage from rotation.
+- Lines that are PEM block boundaries (`-----BEGIN/END ...-----`) no longer emit redundant algorithm matches such as `RSA` on a key header/footer line.
+
+### Changed
+
+- Added a deterministic false-positive regression corpus and runner under `engine/tests/`, with results in `docs/ACCURACY_BASELINE.md`.
+- `engine/runtime/` is now git-ignored build output produced by `npm run prepare-engine`, and `package-lock.json` is committed so `npm ci` is reproducible.
+- Evidence-aware model: `rule_id`, `evidence_type`, `usage_context`, `file_role`, `validation_state`, `confidence_reason` added to all findings; structured parses keep classical rating; text patterns in documentation/vendored/runtime/code are downgraded to `info` inventory.
+- Severity model distinguishes active first-party code/config from comments/strings/docs/vendored/runtime; real insecure usage (`hashlib.md5(...)`, `TLS 1.0` config) stays `high`/`critical`; textual mentions become `info`.
+- Binary fingerprints downgraded to `low` with `unresolved` validation state; manifest dependencies to `observed`.
+- Extension TS `Finding` interface and CBOM report enriched with new fields; backward-compatible additions.
+
+### Added
+
+- `docs/FALSE_POSITIVE_AUDIT.md` — documented false-positive sources and resolutions.
+- `docs/DETECTION_EVIDENCE_MODEL.md` — evidence and validation model specification.
+- `docs/RISK_MODEL.md` — classical risk, Mosca quantum model, and severity mapping.
+- `engine/backend/app/evidence.py` — new evidence and validation model.
+- `engine/backend/app/risk.py` — `inventory_quantum` helper, `summary()` extended.
+- `engine/backend/app/detector.py` — evidence model integration, private-key validation, context-aware severity.
+- `engine/backend/app/openssl_inspector.py` — `_finding()` now passes `evidence_type`, `usage_context`, `validation_state`.
+- `engine/backend/app/scanner.py` — manifest findings with evidence/model fields.
+- `engine/backend/app/container_tools.py` — Syft/Trivy findings with evidence/model fields.
+- `src/extension.ts` — `Finding` interface expanded; `buildCbomReport` adds occurrence/unique-issue counts and distributions.
+
+### Known limitations
+
+- Config TLS 1.0 in `.py` files: severity model keeps `high` for active code; a finer-grained config-notation distinction may be needed in a future focused patch.
+- Multi-line string literals / docstrings: `classify_usage` operates line-by-line; triple-quoted spans across lines are approximated.
+- `0.3.1`/`0.3.2` artifact preservation: these two VSIX files (38.76 MB each) have no GitHub Release and no tags; they remain tracked in Git.
+- Full scope of file-role/scan-scope classification and deterministic dedup aggregation are partially modeled; additional cross-file grouping could be added later.
+- `confidence` values unchanged; new `confidence_reason` provides explanatory text.
+- `quantum_risk` for candidate/unresolved mentions returns `not_applicable` with an explicit reason.
+
 ## [Unreleased]
 
 ### Fixed
