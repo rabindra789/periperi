@@ -3,7 +3,7 @@
   "displayName": "Periperi",
   "icon": "images/logo.png",
   "description": "Periperi: local cryptographic discovery, risk diagnostics and CBOM export for VS Code.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "publisher": "thesixbugs",
   "license": "UNLICENSED",
   "repository": {
@@ -25,21 +25,46 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "periperi",
+          "title": "Periperi",
+          "icon": "images/periperi.svg"
+        }
+      ]
+    },
+    "views": {
+      "periperi": [
+        {
+          "id": "periperi.sidebar",
+          "name": "Periperi",
+          "icon": "images/periperi.svg"
+        }
+      ]
+    },
     "commands": [
-      {"command": "ecdat.scanCurrentFile", "title": "Periperi: Scan Current File"},
-      {"command": "ecdat.scanWorkspace", "title": "Periperi: Scan Workspace"},
+      {"command": "ecdat.scanCurrentFile", "title": "Periperi: Scan Current File", "icon": "$(file-code)"},
+      {"command": "ecdat.scanWorkspace", "title": "Periperi: Scan Workspace", "icon": "$(run-all)"},
       {"command": "ecdat.scanArtifact", "title": "Periperi: Scan Binary, Certificate, Key or Container"},
-      {"command": "ecdat.showReport", "title": "Periperi: Show Cryptographic Report"},
+      {"command": "ecdat.showReport", "title": "Periperi: Show Cryptographic Report", "icon": "$(open-preview)"},
       {"command": "ecdat.exportCbom", "title": "Periperi: Export CBOM"},
-      {"command": "ecdat.clearDiagnostics", "title": "Periperi: Clear Findings"}
+      {"command": "ecdat.clearDiagnostics", "title": "Periperi: Clear Findings"},
+      {"command": "periperi.openSidebar", "title": "Periperi: Open Sidebar"},
+      {"command": "periperi.openOutput", "title": "Periperi: Open Output"}
     ],
     "menus": {
       "editor/context": [
         {"command": "ecdat.scanCurrentFile", "group": "navigation@8", "when": "editorTextFocus"}
+      ],
+      "view/title": [
+        {"command": "ecdat.scanWorkspace", "when": "view == periperi.sidebar", "group": "navigation"},
+        {"command": "ecdat.scanCurrentFile", "when": "view == periperi.sidebar", "group": "navigation"},
+        {"command": "ecdat.showReport", "when": "view == periperi.sidebar", "group": "navigation"}
       ]
     },
     "configuration": {
-      "title": "ECDAT",
+      "title": "Periperi",
       "properties": {
         "ecdat.scanOnSave": {
           "type": "boolean",
@@ -49,12 +74,12 @@
         "ecdat.pythonPath": {
           "type": "string",
           "default": "python",
-          "description": "Python executable used to run the local ECDAT engine."
+          "description": "Python executable used to run the local Periperi engine."
         },
         "ecdat.engineRoot": {
           "type": "string",
           "default": "",
-          "description": "Optional ECDAT repository root. Leave empty when the extension folder is inside the repository."
+          "description": "Optional Periperi engine root. Leave empty when the extension folder is inside the repository."
         },
         "ecdat.dataSensitivity": {
           "type": "string",
@@ -91,7 +116,7 @@
     "watch": "tsc -watch -p ./",
     "check": "tsc --noEmit -p ./",
     "prepare-engine": "node scripts/prepare-engine.mjs",
-    "package": "vsce package --out periperi-0.3.3.vsix"
+    "package": "vsce package --out periperi-0.4.1.vsix"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

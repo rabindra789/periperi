@@ -33,6 +33,16 @@ type Finding = {
 }
 
 type FileResult = { uri: vscode.Uri; findings: Finding[] }
+type SidebarNode = {
+  label: string
+  description?: string
+  tooltip?: string
+  icon?: vscode.ThemeIcon
+  command?: vscode.Command
+  contextValue?: string
+  collapsibleState?: vscode.TreeItemCollapsibleState
+  children?: SidebarNode[]
+}
 type EngineResponse = {
   findings: Finding[]
   engines?: Record<string, { available?: boolean; version?: string; provider?: string; scan?: string }>
@@ -48,6 +58,12 @@ type EngineProgress = {
   message: string
 }
 
+class ScanCancelledError extends Error {
+  constructor() {
+    super('Periperi scan cancelled.')
+  }
+}
+
 const FALLBACK_SCHEMA = 'ECDAT CBOM Prototype 1.1'
 
 const supportedExtensions = new Set([
@@ -60,22 +76,64 @@ const supportedExtensions = new Set([
 const excludedGlob = '**/{.git,.gradle,.cache,.next,.idea,.vscode,node_modules,venv,.venv,__pycache__,target,dist,build,out,bin,obj,coverage,vendor}/**'
 const diagnostics = vscode.languages.createDiagnosticCollection('ecdat')
 const results = new Map<string, FileResult>()
+const findingUris = new WeakMap<Finding, vscode.Uri>()
 let statusItem: vscode.StatusBarItem
+let outputChannel: vscode.OutputChannel
+let sidebarProvider: SidebarTreeProvider
 let reportPanel: vscode.WebviewPanel | undefined
 let lastEngines: EngineResponse['engines'] = {}
 let lastAnalysis: EngineResponse['analysis'] = {}
 let lastInputType = 'source-file'
 let lastScanCompleted = false
+let scanState = 'Ready to scan'
+let scanGeneration = 0
+const activeFileScans = new Set<string>()
+
+class SidebarTreeProvider implements vscode.TreeDataProvider<SidebarNode>, vscode.Disposable {
+  private readonly changeEmitter = new vscode.EventEmitter<SidebarNode | undefined>()
+  readonly onDidChangeTreeData = this.changeEmitter.event
+
+  getTreeItem(node: SidebarNode): vscode.TreeItem {
+    const item = new vscode.TreeItem(node.label, node.collapsibleState)
+    item.description = node.description
+    item.tooltip = node.tooltip
+    item.iconPath = node.icon
+    item.command = node.command
+    item.contextValue = node.contextValue
+    return item
+  }
+
+  getChildren(node?: SidebarNode): SidebarNode[] {
+    return node?.children || buildSidebarNodes()
+  }
+
+  refresh(): void {
+    this.changeEmitter.fire(undefined)
+  }
+
+  dispose(): void {
+    this.changeEmitter.dispose()
+  }
+}
 
 export function activate(context: vscode.ExtensionContext): void {
+  outputChannel = vscode.window.createOutputChannel('Periperi')
+  sidebarProvider = new SidebarTreeProvider()
+  const sidebar = vscode.window.createTreeView('periperi.sidebar', {
+    treeDataProvider: sidebarProvider,
+    showCollapseAll: true,
+  })
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90)
-  statusItem.command = 'ecdat.showReport'
-  statusItem.text = '$(shield) ECDAT ready'
-  statusItem.tooltip = 'Open the ECDAT cryptographic report'
+  statusItem.command = 'periperi.openSidebar'
+  statusItem.text = '$(shield) Periperi ready'
+  statusItem.tooltip = 'Open the Periperi sidebar'
   statusItem.show()
 
   context.subscriptions.push(
     diagnostics,
+    outputChannel,
+    sidebarProvider,
+    sidebar,
     statusItem,
     vscode.commands.registerCommand('ecdat.scanCurrentFile', scanActiveEditor),
     vscode.commands.registerCommand('ecdat.scanWorkspace', scanWorkspace),
@@ -83,6 +141,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('ecdat.showReport', showReport),
     vscode.commands.registerCommand('ecdat.exportCbom', exportCbom),
     vscode.commands.registerCommand('ecdat.clearDiagnostics', clearAll),
+    vscode.commands.registerCommand('periperi.openSidebar', () => vscode.commands.executeCommand('workbench.view.extension.periperi')),
+    vscode.commands.registerCommand('periperi.openOutput', () => outputChannel.show()),
+    vscode.commands.registerCommand('periperi.openFinding', openFinding),
+    vscode.workspace.onDidChangeTextDocument(event => invalidateEditedResults(event.document.uri)),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => invalidateWorkspaceResults()),
     vscode.workspace.onDidSaveTextDocument(document => {
       if (vscode.workspace.getConfiguration('ecdat').get('scanOnSave', true)) {
         void scanDocument(document, false)
@@ -91,15 +154,10 @@ export function activate(context: vscode.ExtensionContext): void {
   )
 }
 
-export function deactivate(): void {
-  diagnostics.dispose()
-  statusItem.dispose()
-}
-
 async function scanActiveEditor(): Promise<void> {
   const editor = vscode.window.activeTextEditor
   if (!editor) {
-    void vscode.window.showInformationMessage('ECDAT: Open a supported source file first.')
+    void vscode.window.showInformationMessage('Periperi: Open a supported source file first.')
     return
   }
   await scanDocument(editor.document, true)
@@ -107,33 +165,57 @@ async function scanActiveEditor(): Promise<void> {
 
 async function scanDocument(document: vscode.TextDocument, announce: boolean): Promise<Finding[]> {
   if (document.uri.scheme !== 'file' || !isSupported(document.uri.fsPath)) {
-    if (announce) void vscode.window.showInformationMessage('ECDAT: This file type is not supported.')
+    if (announce) void vscode.window.showInformationMessage('Periperi: This file type is not supported.')
     return []
   }
   if (Buffer.byteLength(document.getText(), 'utf8') > 2 * 1024 * 1024) {
-    if (announce) void vscode.window.showWarningMessage('ECDAT: Files larger than 2 MB are skipped.')
+    if (announce) void vscode.window.showWarningMessage('Periperi: Files larger than 2 MB are skipped.')
     return []
   }
 
-  setStatus('$(loading~spin) ECDAT scanning')
+  const generation = ++scanGeneration
+  if (clearResultsForDocument(document.uri)) refreshReport()
+  const uriKey = document.uri.toString()
+  activeFileScans.add(uriKey)
+  lastScanCompleted = false
+  scanState = 'Scanning current file'
+  setStatus('$(loading~spin) Periperi scanning')
+  outputChannel.appendLine(`Scanning file: ${vscode.workspace.asRelativePath(document.uri, false)}`)
   try {
     const response = await runEngine(document.uri, document.getText())
+    if (generation !== scanGeneration) {
+      activeFileScans.delete(uriKey)
+      outputChannel.appendLine('Discarded file scan results because the workspace or source changed.')
+      return []
+    }
+    activeFileScans.delete(uriKey)
     const findings = response.findings
     lastEngines = response.engines || lastEngines
     lastAnalysis = response.analysis || lastAnalysis
     lastInputType = response.input_type || 'source-file'
     lastScanCompleted = true
+    scanState = `Completed · ${findings.length} finding${findings.length === 1 ? '' : 's'}`
     results.set(document.uri.toString(), { uri: document.uri, findings })
+    for (const finding of findings) findingUris.set(finding, document.uri)
     diagnostics.set(document.uri, findings.map(toDiagnostic))
     updateStatus()
     refreshReport()
     if (announce) {
-      void vscode.window.showInformationMessage(`ECDAT: Found ${findings.length} cryptographic item${findings.length === 1 ? '' : 's'}.`)
+      void vscode.window.showInformationMessage(`Periperi: Found ${findings.length} cryptographic item${findings.length === 1 ? '' : 's'}.`)
     }
+    outputChannel.appendLine(`Scan completed: ${findings.length} finding${findings.length === 1 ? '' : 's'}.`)
     return findings
   } catch (error) {
-    setStatus('$(error) ECDAT error')
-    void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'ECDAT scan failed.')
+    activeFileScans.delete(uriKey)
+    if (generation !== scanGeneration) {
+      outputChannel.appendLine(`Discarded failed file scan after the source changed: ${error instanceof Error ? error.message : String(error)}`)
+      return []
+    }
+    lastScanCompleted = false
+    scanState = 'Scan failed'
+    outputChannel.appendLine(`Scan failed: ${error instanceof Error ? error.message : String(error)}`)
+    setStatus('$(error) Periperi error')
+    void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'Periperi scan failed.')
     return []
   }
 }
@@ -141,29 +223,42 @@ async function scanDocument(document: vscode.TextDocument, announce: boolean): P
 async function scanWorkspace(): Promise<void> {
   const folder = vscode.workspace.workspaceFolders?.[0]
   if (!folder) {
-    void vscode.window.showInformationMessage('ECDAT: Open a workspace folder first.')
+    void vscode.window.showInformationMessage('Periperi: Open a workspace folder first.')
     return
   }
+  const generation = ++scanGeneration
   results.clear()
   diagnostics.clear()
+  refreshReport()
   lastScanCompleted = false
-  setStatus('$(loading~spin) ECDAT scanning workspace')
+  scanState = 'Scanning workspace'
+  setStatus('$(loading~spin) Periperi scanning workspace')
+  outputChannel.appendLine(`Scanning workspace: ${folder.name}`)
   try {
     const response = await vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
-      title: 'ECDAT full workspace scan · source, binaries, certificates and keys',
-      cancellable: false,
-    }, progress => {
+      title: 'Periperi workspace scan · source, binaries, certificates and keys',
+      cancellable: true,
+    }, (progress, token) => {
       const reportProgress = createProgressReporter(progress)
       reportProgress({ phase: 'preparing', count: 0, total: 0, message: 'Preparing workspace scan' })
       const maxFiles = vscode.workspace.getConfiguration('ecdat').get<number>('maxWorkspaceFiles', 2000)
-      return runEngineRequest({ ...engineOptions(), mode: 'workspace', path: folder.uri.fsPath, max_files: maxFiles }, reportProgress)
+      return runEngineRequest(
+        { ...engineOptions(), mode: 'workspace', path: folder.uri.fsPath, max_files: maxFiles },
+        reportProgress,
+        token
+      )
     })
+    if (generation !== scanGeneration) {
+      outputChannel.appendLine('Discarded workspace scan results because the workspace or source changed.')
+      return
+    }
     results.set(folder.uri.toString(), { uri: folder.uri, findings: response.findings })
     lastEngines = response.engines || {}
     lastAnalysis = response.analysis || lastAnalysis
     lastInputType = response.input_type || 'workspace'
     lastScanCompleted = true
+    scanState = `Completed · ${response.findings.length} finding${response.findings.length === 1 ? '' : 's'}`
     const byFile = new Map<string, Finding[]>()
     for (const finding of response.findings) {
       if (!finding.line || finding.file === 'container-image') continue
@@ -173,15 +268,30 @@ async function scanWorkspace(): Promise<void> {
       const items = byFile.get(candidate) || []
       items.push(finding)
       byFile.set(candidate, items)
+      findingUris.set(finding, vscode.Uri.file(candidate))
     }
     for (const [filePath, findings] of byFile) diagnostics.set(vscode.Uri.file(filePath), findings.map(toDiagnostic))
     updateStatus()
-    showReport()
-    void vscode.window.showInformationMessage(`ECDAT: Scanned ${response.files_scanned || 0} files and found ${response.findings.length} items.`)
+    refreshReport()
+    outputChannel.appendLine(`Workspace scan completed: ${response.files_scanned || 0} files scanned, ${response.findings.length} findings.`)
+    void vscode.window.showInformationMessage(`Periperi: Scanned ${response.files_scanned || 0} files and found ${response.findings.length} items.`)
   } catch (error) {
+    if (generation !== scanGeneration) {
+      outputChannel.appendLine(`Discarded failed workspace scan after the workspace changed: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    if (error instanceof ScanCancelledError) {
+      lastScanCompleted = false
+      scanState = 'Scan cancelled'
+      outputChannel.appendLine(error.message)
+      setStatus('$(circle-slash) Periperi cancelled')
+      return
+    }
     lastScanCompleted = false
-    setStatus('$(error) ECDAT error')
-    void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'ECDAT workspace scan failed.')
+    scanState = 'Scan failed'
+    outputChannel.appendLine(`Workspace scan failed: ${error instanceof Error ? error.message : String(error)}`)
+    setStatus('$(error) Periperi error')
+    void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'Periperi workspace scan failed.')
   }
 }
 
@@ -190,39 +300,66 @@ async function scanArtifact(): Promise<void> {
     canSelectFiles: true,
     canSelectFolders: false,
     canSelectMany: false,
-    openLabel: 'Scan with ECDAT',
+    openLabel: 'Scan with Periperi',
     filters: {
-      'ECDAT inputs': ['zip', 'tar', 'gz', 'tgz', 'exe', 'dll', 'so', 'dylib', 'jar', 'war', 'apk', 'pem', 'crt', 'cer', 'der', 'key', 'p12', 'pfx'],
+      'Periperi inputs': ['zip', 'tar', 'gz', 'tgz', 'exe', 'dll', 'so', 'dylib', 'jar', 'war', 'apk', 'pem', 'crt', 'cer', 'der', 'key', 'p12', 'pfx'],
       'All files': ['*'],
     },
   })
   if (!selected?.[0]) return
+  const generation = ++scanGeneration
   lastScanCompleted = false
-  setStatus('$(loading~spin) ECDAT scanning artifact')
+  scanState = 'Scanning artifact'
+  results.clear()
+  diagnostics.clear()
+  refreshReport()
+  setStatus('$(loading~spin) Periperi scanning artifact')
+  outputChannel.appendLine(`Scanning artifact: ${selected[0].fsPath}`)
   try {
     const response = await vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
-      title: `ECDAT scanning ${path.basename(selected[0].fsPath)}`,
-      cancellable: false,
-    }, progress => {
+      title: `Periperi scanning ${path.basename(selected[0].fsPath)}`,
+      cancellable: true,
+    }, (progress, token) => {
       const reportProgress = createProgressReporter(progress)
       reportProgress({ phase: 'preparing', count: 0, total: 0, message: 'Preparing artifact scan' })
-      return runEngineRequest({ ...engineOptions(), mode: 'artifact', path: selected[0].fsPath }, reportProgress)
+      return runEngineRequest(
+        { ...engineOptions(), mode: 'artifact', path: selected[0].fsPath },
+        reportProgress,
+        token
+      )
     })
-    results.clear()
-    diagnostics.clear()
+    if (generation !== scanGeneration) {
+      outputChannel.appendLine('Discarded artifact scan results because the workspace changed.')
+      return
+    }
     results.set(selected[0].toString(), { uri: selected[0], findings: response.findings })
     lastEngines = response.engines || {}
     lastAnalysis = response.analysis || lastAnalysis
     lastInputType = response.input_type || 'artifact'
     lastScanCompleted = true
+    scanState = `Completed · ${response.findings.length} finding${response.findings.length === 1 ? '' : 's'}`
     updateStatus()
-    showReport()
-    void vscode.window.showInformationMessage(`ECDAT: Found ${response.findings.length} cryptographic items.`)
+    refreshReport()
+    outputChannel.appendLine(`Artifact scan completed: ${response.findings.length} findings.`)
+    void vscode.window.showInformationMessage(`Periperi: Found ${response.findings.length} cryptographic items.`)
   } catch (error) {
+    if (generation !== scanGeneration) {
+      outputChannel.appendLine(`Discarded failed artifact scan after the workspace changed: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    if (error instanceof ScanCancelledError) {
+      lastScanCompleted = false
+      scanState = 'Scan cancelled'
+      outputChannel.appendLine(error.message)
+      setStatus('$(circle-slash) Periperi cancelled')
+      return
+    }
     lastScanCompleted = false
-    setStatus('$(error) ECDAT error')
-    void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'ECDAT artifact scan failed.')
+    scanState = 'Scan failed'
+    outputChannel.appendLine(`Artifact scan failed: ${error instanceof Error ? error.message : String(error)}`)
+    setStatus('$(error) Periperi error')
+    void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'Periperi artifact scan failed.')
   }
 }
 
@@ -246,7 +383,7 @@ function createProgressReporter(
     lastPercent = Math.max(lastPercent, percent)
     const counter = total ? ` (${event.count}/${event.total})` : ''
     progress.report({ message: `${event.message}${counter}`, increment })
-    setStatus(`$(loading~spin) ECDAT ${event.message.toLowerCase()}`)
+    setStatus(`$(loading~spin) Periperi ${event.message.toLowerCase()}`)
   }
 }
 
@@ -277,7 +414,8 @@ function runEngine(uri: vscode.Uri, text: string): Promise<EngineResponse> {
 
 function runEngineRequest(
   payloadObject: Record<string, unknown>,
-  onProgress?: (event: EngineProgress) => void
+  onProgress?: (event: EngineProgress) => void,
+  cancellationToken?: vscode.CancellationToken
 ): Promise<EngineResponse> {
   const config = vscode.workspace.getConfiguration('ecdat')
   const extensionRoot = path.resolve(__dirname, '..')
@@ -313,6 +451,10 @@ function runEngineRequest(
   const bootstrap = `import sys; sys.path[:0]=${JSON.stringify(searchPaths)}; from backend.app.vscode_bridge import main; main()`
 
   return new Promise((resolve, reject) => {
+    if (cancellationToken?.isCancellationRequested) {
+      reject(new ScanCancelledError())
+      return
+    }
     const child: ChildProcessWithoutNullStreams = spawn(
       python,
       ['-c', bootstrap],
@@ -321,6 +463,11 @@ function runEngineRequest(
     let output = ''
     let errors = ''
     let stderrBuffer = ''
+    let cancelled = false
+    const cancellation = cancellationToken?.onCancellationRequested(() => {
+      cancelled = true
+      child.kill()
+    })
     const consumeErrors = (chunk: string) => {
       stderrBuffer += chunk
       const lines = stderrBuffer.split(/\r?\n/)
@@ -333,8 +480,17 @@ function runEngineRequest(
     }
     child.stdout.setEncoding('utf8').on('data', chunk => { output += chunk })
     child.stderr.setEncoding('utf8').on('data', consumeErrors)
-    child.on('error', () => reject(new Error('ECDAT could not start Python. Check the ecdat.pythonPath setting.')))
+    child.on('error', error => {
+      cancellation?.dispose()
+      outputChannel.appendLine(`Could not start Python: ${error.message}`)
+      reject(new Error('Periperi could not start Python. Check the ecdat.pythonPath setting.'))
+    })
     child.on('close', code => {
+      cancellation?.dispose()
+      if (cancelled) {
+        reject(new ScanCancelledError())
+        return
+      }
       if (stderrBuffer.trim()) {
         const event = parseProgressLine(stderrBuffer)
         if (event) onProgress?.(event)
@@ -342,13 +498,13 @@ function runEngineRequest(
       }
       try {
         const response = JSON.parse(output) as EngineResponse & { error?: string }
-        if (code !== 0 || response.error) reject(new Error(response.error || errors || 'ECDAT engine returned an error.'))
+        if (code !== 0 || response.error) reject(new Error(response.error || errors || 'Periperi engine returned an error.'))
         else resolve({ ...response, findings: response.findings || [] })
       } catch {
         const dependencyHint = errors.includes("No module named 'cryptography'") || errors.includes('_cffi_backend')
-          ? 'ECDAT could not load its bundled Python runtime. Reinstall the latest VSIX or set ecdat.pythonPath to a compatible CPython 3.10-3.14 executable.'
+          ? 'Periperi could not load its bundled Python runtime. Reinstall the latest VSIX or set ecdat.pythonPath to a compatible CPython 3.10-3.14 executable.'
           : errors
-        reject(new Error(dependencyHint || 'ECDAT returned an unreadable result. Check the engine path.'))
+        reject(new Error(dependencyHint || 'Periperi returned an unreadable result. Check the engine path.'))
       }
     })
     child.stdin.end(payload)
@@ -363,7 +519,7 @@ function toDiagnostic(finding: Finding): vscode.Diagnostic {
     `${finding.name}: ${finding.reason} Recommendation: ${finding.recommendation}`,
     severityFor(finding.risk)
   )
-  diagnostic.source = 'ECDAT'
+  diagnostic.source = 'Periperi'
   diagnostic.code = finding.quantum_risk === 'not_applicable'
     ? finding.risk.toUpperCase()
     : `${finding.risk.toUpperCase()} / Quantum ${finding.quantum_risk.toUpperCase()}`
@@ -396,6 +552,112 @@ function isProbablyBinary(bytes: Uint8Array): boolean {
 
 function allFindings(): Finding[] {
   return [...results.values()].flatMap(item => item.findings)
+}
+
+function buildSidebarNodes(): SidebarNode[] {
+  const findings = allFindings()
+  const workspaceName = vscode.workspace.name || 'No workspace open'
+  const overview: SidebarNode = {
+    label: 'Overview',
+    icon: new vscode.ThemeIcon('home'),
+    collapsibleState: vscode.TreeItemCollapsibleState.Expanded,
+    children: [
+      {
+        label: workspaceName,
+        description: 'Workspace',
+        icon: new vscode.ThemeIcon('folder'),
+      },
+      {
+        label: scanState,
+        icon: new vscode.ThemeIcon(
+          scanState.startsWith('Scanning') ? 'loading~spin'
+            : scanState === 'Scan failed' ? 'error'
+              : scanState === 'Scan cancelled' ? 'circle-slash'
+                : lastScanCompleted ? 'check' : 'circle-outline'
+        ),
+      },
+      sidebarAction('Scan Workspace', 'ecdat.scanWorkspace', 'run'),
+      sidebarAction('Scan Current File', 'ecdat.scanCurrentFile', 'file-code'),
+      sidebarAction('Scan Artifact', 'ecdat.scanArtifact', 'package'),
+      sidebarAction('Open Report', 'ecdat.showReport', 'open-preview'),
+      sidebarAction('Export CBOM', 'ecdat.exportCbom', 'export'),
+      sidebarAction('Open Output', 'periperi.openOutput', 'output'),
+    ],
+  }
+  const byFile = new Map<string, Finding[]>()
+  for (const finding of findings) {
+    const items = byFile.get(finding.file) || []
+    items.push(finding)
+    byFile.set(finding.file, items)
+  }
+  const findingChildren: SidebarNode[] = byFile.size
+    ? [...byFile.entries()].sort(([first], [second]) => first.localeCompare(second)).map(([file, fileFindings]) => ({
+      label: file || 'Unknown location',
+      description: String(fileFindings.length),
+      icon: new vscode.ThemeIcon('file'),
+      collapsibleState: vscode.TreeItemCollapsibleState.Collapsed,
+      children: fileFindings.map(finding => ({
+        label: finding.name,
+        description: `${finding.risk.toUpperCase()}${finding.line > 0 ? ` · line ${finding.line}` : ''}`,
+        tooltip: `${finding.name}\n${finding.reason}\nEvidence: ${finding.evidence}\nRecommendation: ${finding.recommendation}`,
+        icon: new vscode.ThemeIcon(findingIcon(finding.risk)),
+        contextValue: 'periperi.finding',
+        command: {
+          command: 'periperi.openFinding',
+          title: 'Open Finding',
+          arguments: [finding],
+        },
+      })),
+    }))
+    : [{
+      label: lastScanCompleted ? 'No findings in the latest scan' : 'Run a scan to see findings',
+      description: lastScanCompleted ? undefined : 'No scan results yet',
+      icon: new vscode.ThemeIcon(lastScanCompleted ? 'check' : 'info'),
+    }]
+  return [
+    overview,
+    {
+      label: `Findings${findings.length ? ` (${findings.length})` : ''}`,
+      icon: new vscode.ThemeIcon('list-tree'),
+      collapsibleState: vscode.TreeItemCollapsibleState.Expanded,
+      children: findingChildren,
+    },
+  ]
+}
+
+function sidebarAction(label: string, commandId: string, icon: string): SidebarNode {
+  return {
+    label,
+    icon: new vscode.ThemeIcon(icon),
+    command: { command: commandId, title: label },
+  }
+}
+
+function findingIcon(risk: string): string {
+  if (risk === 'critical' || risk === 'high') return 'error'
+  if (risk === 'medium') return 'warning'
+  if (risk === 'low') return 'info'
+  return 'circle-outline'
+}
+
+async function openFinding(finding: Finding): Promise<void> {
+  const uri = findingUris.get(finding)
+  if (!uri || finding.line < 1) {
+    showReport()
+    return
+  }
+  try {
+    const document = await vscode.workspace.openTextDocument(uri)
+    const line = Math.min(finding.line - 1, document.lineCount - 1)
+    const position = new vscode.Position(line, 0)
+    const editor = await vscode.window.showTextDocument(document, vscode.ViewColumn.Active)
+    editor.selection = new vscode.Selection(position, position)
+    editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    outputChannel.appendLine(`Could not open finding source ${uri.fsPath}: ${message}`)
+    void vscode.window.showErrorMessage(`Periperi could not open the finding source: ${message}`)
+  }
 }
 
 function inventoryByCategory(findings: Finding[], category: string): string[] {
@@ -491,28 +753,85 @@ function updateStatus(): void {
   const findings = allFindings()
   const urgent = findings.filter(item => item.risk === 'critical' || item.risk === 'high').length
   statusItem.text = urgent
-    ? `$(warning) ECDAT ${findings.length} findings · ${urgent} urgent`
-    : `$(shield) ECDAT ${findings.length} findings`
+    ? `$(warning) Periperi ${findings.length} findings · ${urgent} urgent`
+    : `$(shield) Periperi ${findings.length} findings`
+  sidebarProvider.refresh()
 }
 
 function setStatus(text: string): void {
   statusItem.text = text
+  sidebarProvider.refresh()
 }
 
 function clearAll(): void {
+  scanGeneration += 1
   results.clear()
   diagnostics.clear()
-  updateStatus()
-  refreshReport()
   lastEngines = {}
   lastAnalysis = {}
   lastInputType = 'source-file'
   lastScanCompleted = false
+  scanState = 'Ready to scan'
+  updateStatus()
+  refreshReport()
+}
+
+function clearResultsForDocument(uri: vscode.Uri): boolean {
+  const key = uri.toString()
+  let changed = false
+  for (const [resultKey, result] of results) {
+    const remaining = result.findings.filter(finding => findingUris.get(finding)?.toString() !== key)
+    if (remaining.length !== result.findings.length || resultKey === key) {
+      changed = true
+      if (resultKey === key) results.delete(resultKey)
+      else results.set(resultKey, { ...result, findings: remaining })
+    }
+  }
+  if (diagnostics.has(uri)) {
+    diagnostics.delete(uri)
+    changed = true
+  }
+  return changed
+}
+
+function invalidateEditedResults(uri: vscode.Uri): void {
+  if (uri.scheme !== 'file') return
+  const hasWorkspaceResults = lastInputType === 'workspace'
+    && results.size > 0
+    && Boolean(vscode.workspace.getWorkspaceFolder(uri))
+  const workspaceScanInProgress = scanState === 'Scanning workspace'
+    && Boolean(vscode.workspace.getWorkspaceFolder(uri))
+  const activeFileScan = activeFileScans.delete(uri.toString())
+  if (hasWorkspaceResults || workspaceScanInProgress) {
+    results.clear()
+    diagnostics.clear()
+  } else if (!activeFileScan && !clearResultsForDocument(uri)) {
+    return
+  }
+  scanGeneration += 1
+  lastScanCompleted = false
+  scanState = 'Results stale · scan again'
+  outputChannel.appendLine(`Invalidated scan results after source changes: ${uri.fsPath}`)
+  updateStatus()
+  refreshReport()
+}
+
+function invalidateWorkspaceResults(): void {
+  const sourceScanInProgress = scanState === 'Scanning workspace' || activeFileScans.size > 0
+  if (!sourceScanInProgress && (results.size === 0 || lastInputType === 'artifact')) return
+  scanGeneration += 1
+  results.clear()
+  diagnostics.clear()
+  lastScanCompleted = false
+  scanState = 'Workspace changed · scan again'
+  outputChannel.appendLine('Invalidated scan results after workspace folders changed.')
+  updateStatus()
+  refreshReport()
 }
 
 function showReport(): void {
   if (!reportPanel) {
-    reportPanel = vscode.window.createWebviewPanel('ecdatReport', 'ECDAT Cryptographic Report', vscode.ViewColumn.Beside, { enableScripts: false })
+    reportPanel = vscode.window.createWebviewPanel('ecdatReport', 'Periperi Report', vscode.ViewColumn.Beside, { enableScripts: false })
     reportPanel.onDidDispose(() => { reportPanel = undefined })
   }
   refreshReport()
@@ -554,38 +873,39 @@ function refreshReport(): void {
   }, null, 2) || '')
 
   reportPanel.webview.html = `<!doctype html><html><head><meta charset="UTF-8"><style>
-    :root{color-scheme:light dark}body{font-family:var(--vscode-font-family);padding:24px;line-height:1.5}
+    :root{color-scheme:light dark}body{font-family:var(--vscode-font-family);padding:24px;line-height:1.5;color:var(--vscode-foreground);background:var(--vscode-editor-background)}
     h1{font-size:26px;margin:0 0 4px}.sub{opacity:.7;margin:0 0 24px}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:22px}
     .metric{border:1px solid var(--vscode-panel-border);padding:14px}.metric b{display:block;font-size:25px}.metric span{font-size:11px;opacity:.7;text-transform:uppercase}
     table{border-collapse:collapse;width:100%;font-size:12px}th,td{border-bottom:1px solid var(--vscode-panel-border);padding:10px;text-align:left;vertical-align:top}th{font-size:10px;text-transform:uppercase;opacity:.75}
-    td small{display:block;opacity:.65;margin-top:3px}.badge{text-transform:uppercase;font-size:10px;font-weight:700}.critical,.high{color:#e05c63}.medium{color:#d7a13d}.low{color:#47a884}.info{color:#6fa7c7}
+    td small{display:block;opacity:.65;margin-top:3px}.badge{text-transform:uppercase;font-size:10px;font-weight:700}.critical,.high{color:var(--vscode-errorForeground)}.medium{color:var(--vscode-editorWarning-foreground)}.low{color:var(--vscode-testing-iconPassed)}.info{color:var(--vscode-textLink-foreground)}
     .cbom-report{border:1px solid var(--vscode-panel-border);margin:0 0 22px;padding:16px}.cbom-report h2{font-size:17px;margin:0 0 4px}.cbom-report p{opacity:.7;margin:0 0 12px;font-size:12px}.cbom-report pre{background:var(--vscode-textCodeBlock-background);padding:12px;max-height:360px;overflow:auto;font-size:11px;white-space:pre-wrap;word-break:break-word}
     .empty{padding:45px 0;text-align:center;opacity:.7}@media(max-width:800px){.metrics{grid-template-columns:repeat(2,1fr)}table{display:block;overflow:auto}}
   </style></head><body>
-    <h1>ECDAT Cryptographic Report</h1><p class="sub">${escapeHtml(lastInputType.replaceAll('-', ' '))}${lastAnalysis?.engine_version ? ` · engine ${escapeHtml(lastAnalysis.engine_version)}` : ''}${engineLabels ? ` · ${escapeHtml(engineLabels)}` : ''}</p>
+    <h1>Periperi Report</h1><p class="sub">${escapeHtml(lastInputType.replaceAll('-', ' '))}${lastAnalysis?.engine_version ? ` · engine ${escapeHtml(lastAnalysis.engine_version)}` : ''}${engineLabels ? ` · ${escapeHtml(engineLabels)}` : ''}</p>
     <div class="metrics"><div class="metric"><b>${findings.length}</b><span>Total findings</span></div><div class="metric"><b>${count('critical')}</b><span>Critical</span></div><div class="metric"><b>${count('high')}</b><span>High</span></div><div class="metric"><b>${results.size}</b><span>Files with findings</span></div></div>
-    <section class="cbom-report"><h2>CBOM report</h2><p>Preview of the generated CBOM. Run <strong>ECDAT: Export CBOM</strong> to save the complete report as JSON.</p><pre>${cbomPreview}</pre></section>
-    ${findings.length ? `<table><thead><tr><th>Finding</th><th>Location</th><th>Risk</th><th>Quantum</th><th>Recommendation</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">Run an ECDAT file or workspace scan to populate this report.</div>'}
+    <section class="cbom-report"><h2>CBOM report</h2><p>Preview of the generated CBOM. Run <strong>Periperi: Export CBOM</strong> to save the complete report as JSON.</p><pre>${cbomPreview}</pre></section>
+    ${findings.length ? `<table><thead><tr><th>Finding</th><th>Location</th><th>Risk</th><th>Quantum</th><th>Recommendation</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">Run a Periperi file or workspace scan to populate this report.</div>'}
   </body></html>`
 }
 
 async function exportCbom(): Promise<void> {
   if (!lastScanCompleted) {
-    void vscode.window.showInformationMessage('ECDAT: Run a scan before exporting a CBOM.')
+    void vscode.window.showInformationMessage('Periperi: Run a scan before exporting a CBOM.')
     return
   }
   const findings = allFindings()
   const target = await vscode.window.showSaveDialog({
     defaultUri: vscode.workspace.workspaceFolders?.[0]
-      ? vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, 'ecdat-cbom.json')
+      ? vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, 'periperi-cbom.json')
       : undefined,
     filters: { JSON: ['json'] },
-    saveLabel: 'Export ECDAT CBOM',
+    saveLabel: 'Export Periperi CBOM',
   })
   if (!target) return
   const report = buildCbomReport(findings)
   await vscode.workspace.fs.writeFile(target, Buffer.from(JSON.stringify(report, null, 2), 'utf8'))
-  void vscode.window.showInformationMessage('ECDAT: CBOM exported successfully.')
+  outputChannel.appendLine(`CBOM exported to ${target.fsPath}`)
+  void vscode.window.showInformationMessage('Periperi: CBOM exported successfully.')
 }
 
 function riskRank(risk: string): number {
