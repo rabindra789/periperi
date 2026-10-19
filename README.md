@@ -76,6 +76,12 @@ Request fields: `mode` (`text` | `workspace` | `artifact`), `path`, `text`, `max
 
 Issues and pull requests are welcome. Please state the Periperi version, your VS Code, Python, Syft and Trivy versions, and the exact command you ran. Extension behaviour is written in `src/extension.ts`; run `npm run compile` and commit the regenerated `out/extension.js` alongside `package.json`.
 
+## Support
+
+If Periperi is useful to you, you can buy me a coffee.
+
+<a href="https://buymeacoffee.com/rabindra789" target="_blank" rel="noopener noreferrer"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" width="217" height="60"></a>
+
 ## Licence
 
 Unlicensed prototype. No licence file has been published, so no grant of rights is made. Add one before redistributing.
